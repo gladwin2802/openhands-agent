@@ -1,0 +1,100 @@
+{
+  "$schema": "./metadata_schema.json",
+  "schema_version": "2.0",
+  "entity": {
+    "name": "consumer",
+    "domain": "cpg",
+    "description": "Consumer profile change events delivered as JSON and processed through landing, bronze, and silver Lakeflow layers.",
+    "source_system": "cpg_seed_data",
+    "business_grain": "one change event per consumer_id",
+    "primary_keys": [ "consumer_id" ]
+  },
+  "job": {
+    "name_template": "{entity_name}_workflow",
+    "trigger": {
+      "type": "file_arrival",
+      "settings": {
+        "path_template": "/Volumes/{catalog}/{pipeline_schema}/{volume}/{entity_name}/"
+      }
+    },
+    "pipeline_flow": [
+      {
+        "pipeline": "bronze",
+        "depends_on": []
+      },
+      {
+        "pipeline": "silver",
+        "depends_on": [
+          "bronze"
+        ]
+      }
+    ]
+  },
+  "source": {
+    "format": "json",
+    "reader_options": {
+      "multiLine": true
+    },
+    "schema": [
+      { "name": "consumer_id", "type": "integer", "nullable": false, "primary_key": true, "description": "Primary consumer identifier." },
+      { "name": "name", "type": "string", "nullable": true, "description": "Full consumer name." },
+      { "name": "age", "type": "integer", "nullable": true, "description": "Consumer age in years." },
+      { "name": "gender", "type": "string", "nullable": true, "description": "Consumer gender label." },
+      { "name": "email", "type": "string", "nullable": true, "description": "Consumer email address." },
+      { "name": "phone", "type": "string", "nullable": true, "description": "Consumer phone number in mixed formatting." },
+      { "name": "address", "type": "string", "nullable": true, "description": "Street address." },
+      { "name": "city", "type": "string", "nullable": true, "description": "City name." },
+      { "name": "state", "type": "string", "nullable": true, "description": "State or region." },
+      { "name": "country", "type": "string", "nullable": true, "description": "Country name." },
+      { "name": "registration_date", "type": "string", "nullable": true, "description": "Registration date in yyyy-MM-dd format.", "format": "yyyy-MM-dd" },
+      { "name": "is_active", "type": "boolean", "nullable": true, "description": "Whether the consumer is currently active." },
+      { "name": "operation", "type": "string", "nullable": false, "description": "CDC operation flag." }
+    ]
+  },
+  "processing_rules": {
+    "cdc": {
+      "enabled": true,
+      "type": "scd2",
+      "keys": [ "consumer_id" ],
+      "sequence_by": "ingestion_time",
+      "operation_column": "operation",
+      "delete_value": "delete"
+    },
+    "layers": {
+      "landing": {
+        "generated_columns": [
+          { "name": "ingestion_time", "type": "timestamp", "expression": "current_timestamp()", "description": "Timestamp of when the record was ingested." }
+        ]
+      },
+      "bronze": {
+        "source_table": "{entity_name}_cdc_stream",
+        "target_view": "{entity_name}_mv",
+        "quality": "bronze",
+        "filters": [ "__START_AT IS NOT NULL AND __END_AT IS NULL" ],
+        "drop_columns": [ "operation", "ingestion_time", "__START_AT", "__END_AT", "__OPERATION" ]
+      },
+      "silver": {
+        "source_view": "{entity_name}_mv",
+        "target_view": "{entity_name}_mv",
+        "quality": "silver",
+        "expectations": [
+          { "name": "valid_consumer_id", "expression": "consumer_id IS NOT NULL", "action": "drop" }
+        ],
+        "transformations": [
+          { "rule": "trim", "columns": [ "name", "gender", "email", "phone", "address", "city", "state", "country" ] },
+          { "rule": "digits_only", "columns": [ "phone" ] },
+          { "rule": "null_if_lt", "columns": [ "phone" ], "params": { "length": 10 } },
+          { "rule": "to_date", "columns": [ "registration_date" ], "params": { "format": "yyyy-MM-dd" } }
+        ]
+      }
+    }
+  },
+  "runtime_config": {
+    "required_keys": [
+      { "name": "catalog", "type": "string", "required": true, "description": "Catalog for volumes and schemas." },
+      { "name": "pipeline_schema", "type": "string", "required": true, "description": "Schema for the source volume." },
+      { "name": "volume", "type": "string", "required": true, "description": "Volume for source files." },
+      { "name": "target_schema", "type": "string", "required": true, "description": "Target schema for the pipeline layer." }
+    ]
+  }
+}

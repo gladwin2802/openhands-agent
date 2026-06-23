@@ -1,0 +1,478 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DataPipelineMetadata",
+  "definitions": {
+    "schema_field": {
+      "type": "object",
+      "required": [
+        "name",
+        "type"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "string",
+            "integer",
+            "long",
+            "double",
+            "float",
+            "boolean",
+            "timestamp",
+            "date",
+            "array",
+            "struct"
+          ]
+        },
+        "nullable": {
+          "type": "boolean"
+        },
+        "primary_key": {
+          "type": "boolean"
+        },
+        "description": {
+          "type": "string"
+        },
+        "format": {
+          "type": "string"
+        },
+        "element_type": {
+          "type": "string",
+          "enum": [
+            "string",
+            "integer",
+            "long",
+            "double",
+            "float",
+            "boolean",
+            "timestamp",
+            "date"
+          ]
+        },
+        "contains": {
+          "$ref": "#/definitions/schema_field"
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/schema_field"
+          }
+        }
+      }
+    }
+  },
+  "type": "object",
+  "required": [
+    "schema_version",
+    "entity",
+    "job",
+    "source",
+    "processing_rules",
+    "runtime_config"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "entity": {
+      "type": "object",
+      "required": [
+        "name",
+        "domain"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "domain": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "source_system": {
+          "type": "string"
+        },
+        "business_grain": {
+          "type": "string"
+        },
+        "primary_keys": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "job": {
+      "type": "object",
+      "required": [
+        "name_template",
+        "trigger",
+        "pipeline_flow"
+      ],
+      "properties": {
+        "name_template": {
+          "type": "string"
+        },
+        "trigger": {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "file_arrival",
+                "schedule",
+                "manual"
+              ]
+            },
+            "settings": {
+              "type": "object",
+              "properties": {
+                "path_template": {
+                  "type": "string"
+                },
+                "cron_expression": {
+                  "type": "string"
+                },
+                "time_zone": {
+                  "type": "string"
+                },
+                "min_time_between_triggers_seconds": {
+                  "type": "integer"
+                },
+                "wait_after_last_change_seconds": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "pipeline_flow": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "pipeline",
+              "depends_on"
+            ],
+            "properties": {
+              "pipeline": {
+                "type": "string"
+              },
+              "depends_on": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "required": [
+        "format",
+        "schema"
+      ],
+      "properties": {
+        "format": {
+          "type": "string",
+          "enum": [
+            "json",
+            "csv",
+            "parquet",
+            "delta"
+          ]
+        },
+        "reader_options": {
+          "type": "object",
+          "additionalProperties": {
+            "type": [
+              "string",
+              "number",
+              "boolean"
+            ]
+          }
+        },
+        "schema": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/schema_field"
+          }
+        }
+      }
+    },
+    "processing_rules": {
+      "type": "object",
+      "required": [
+        "cdc",
+        "layers"
+      ],
+      "properties": {
+        "cdc": {
+          "type": "object",
+          "required": [
+            "enabled"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "scd1",
+                "scd2"
+              ]
+            },
+            "keys": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "sequence_by": {
+              "type": "string"
+            },
+            "operation_column": {
+              "type": "string"
+            },
+            "delete_value": {
+              "type": "string"
+            }
+          }
+        },
+        "layers": {
+          "type": "object",
+          "properties": {
+            "landing": {
+              "type": "object",
+              "properties": {
+                "generated_columns": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "name",
+                      "type",
+                      "expression"
+                    ],
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "type": {
+                        "type": "string"
+                      },
+                      "expression": {
+                        "type": "string"
+                      },
+                      "description": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "bronze": {
+              "type": "object",
+              "required": [
+                "source_table",
+                "target_view"
+              ],
+              "properties": {
+                "source_table": {
+                  "type": "string"
+                },
+                "target_view": {
+                  "type": "string"
+                },
+                "quality": {
+                  "type": "string"
+                },
+                "filters": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "drop_columns": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "silver": {
+              "type": "object",
+              "required": [
+                "source_view",
+                "target_view"
+              ],
+              "properties": {
+                "source_view": {
+                  "type": "string"
+                },
+                "target_view": {
+                  "type": "string"
+                },
+                "quality": {
+                  "type": "string"
+                },
+                "expectations": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "name",
+                      "expression",
+                      "action"
+                    ],
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "expression": {
+                        "type": "string"
+                      },
+                      "action": {
+                        "type": "string",
+                        "enum": [
+                          "drop",
+                          "fail",
+                          "warn"
+                        ]
+                      }
+                    }
+                  }
+                },
+                "transformations": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "rule",
+                      "columns"
+                    ],
+                    "properties": {
+                      "rule": {
+                        "type": "string",
+                        "enum": [
+                          "trim",
+                          "digits_only",
+                          "null_if_lt",
+                          "to_date",
+                          "upper",
+                          "lower",
+                          "coalesce",
+                          "custom_sql",
+                          "from_unixtime",
+                          "to_utc_timestamp"
+                        ]
+                      },
+                      "columns": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "params": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "runtime_config": {
+      "type": "object",
+      "required": [
+        "required_keys"
+      ],
+      "properties": {
+        "required_keys": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "type",
+              "required"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string"
+              },
+              "required": {
+                "type": "boolean"
+              },
+              "description": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "relationships": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "relationship_type",
+          "local_keys",
+          "referenced_entity",
+          "referenced_keys"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "relationship_type": {
+            "type": "string",
+            "enum": [
+              "one_to_one",
+              "one_to_many",
+              "many_to_one",
+              "many_to_many"
+            ]
+          },
+          "local_keys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "referenced_entity": {
+            "type": "string"
+          },
+          "referenced_keys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}

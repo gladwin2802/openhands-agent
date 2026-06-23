@@ -20,12 +20,18 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT PRIMARY KEY,
                 prompt TEXT NOT NULL,
+                name TEXT,
                 status TEXT NOT NULL DEFAULT 'pending',
                 workspace_path TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
         """)
+        # Try to add the name column if it doesn't exist (for existing databases)
+        try:
+            await db.execute("ALTER TABLE sessions ADD COLUMN name TEXT")
+        except aiosqlite.OperationalError:
+            pass
         await db.execute("""
             CREATE TABLE IF NOT EXISTS events (
                 id TEXT PRIMARY KEY,
@@ -68,24 +74,35 @@ def _now():
 
 # --------------- Sessions ---------------
 
-async def create_session(prompt: str, workspace_path: str) -> dict:
+async def create_session(prompt: str, workspace_path: str, name: str = None) -> dict:
     """Create a new session and return it as a dict."""
     session_id = str(uuid.uuid4())
     now = _now()
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "INSERT INTO sessions (id, prompt, status, workspace_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (session_id, prompt, "pending", workspace_path, now, now),
+            "INSERT INTO sessions (id, prompt, name, status, workspace_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (session_id, prompt, name, "pending", workspace_path, now, now),
         )
         await db.commit()
     return {
         "id": session_id,
         "prompt": prompt,
+        "name": name,
         "status": "pending",
         "workspace_path": workspace_path,
         "created_at": now,
         "updated_at": now,
     }
+
+async def update_session_name(session_id: str, name: str):
+    """Update the user-defined name of a session."""
+    now = _now()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE sessions SET name = ?, updated_at = ? WHERE id = ?",
+            (name, now, session_id),
+        )
+        await db.commit()
 
 
 async def update_session_status(session_id: str, status: str):

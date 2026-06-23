@@ -1,11 +1,14 @@
 import { useEffect, useState } from 'react';
-import { getSessions, deleteAllSessions } from '../api';
+import { getSessions, deleteAllSessions, updateSessionName } from '../api';
+import { VscAdd, VscTrash, VscRefresh, VscEdit } from 'react-icons/vsc';
 
 /**
  * Sidebar listing all sessions with prompt preview, status, and timestamp.
  */
 export default function SessionSidebar({ currentSessionId, onSelectSession, refreshTrigger }) {
   const [sessions, setSessions] = useState([]);
+  const [editingSessionId, setEditingSessionId] = useState(null);
+  const [editNameValue, setEditNameValue] = useState('');
 
   useEffect(() => {
     loadSessions();
@@ -47,16 +50,48 @@ export default function SessionSidebar({ currentSessionId, onSelectSession, refr
     }
   };
 
+  const handleEditClick = (e, session) => {
+    e.stopPropagation();
+    setEditingSessionId(session.id);
+    setEditNameValue(session.name || session.prompt);
+  };
+
+  const handleEditSubmit = async (e, sessionId) => {
+    e.preventDefault();
+    if (!editNameValue.trim()) {
+      setEditingSessionId(null);
+      return;
+    }
+    try {
+      await updateSessionName(sessionId, editNameValue.trim());
+      setEditingSessionId(null);
+      loadSessions(); // refresh list to show new name
+    } catch (err) {
+      console.error('Failed to rename session:', err);
+    }
+  };
+
+  const handleEditKeyDown = (e, sessionId) => {
+    if (e.key === 'Enter') {
+      handleEditSubmit(e, sessionId);
+    } else if (e.key === 'Escape') {
+      setEditingSessionId(null);
+    }
+  };
+
   return (
     <div className="session-sidebar" id="session-sidebar">
-      <div className="panel-header">
-        <h3>Chats</h3>
+      <div className="panel-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <h3>Agent Tasks</h3>
         <div style={{ display: 'flex', gap: '4px' }}>
-          <button className="btn btn-ghost btn-sm" onClick={handleDeleteAll} title="Delete all sessions" style={{ color: 'var(--status-error)' }}>
-            🗑️
+          <button className="btn btn-ghost btn-sm" onClick={() => onSelectSession(null)} title="New Task" style={{ padding: '4px' }}>
+            <VscAdd size={16} />
           </button>
-          <button className="btn btn-ghost btn-sm" onClick={loadSessions} title="Refresh sessions">
-            ↻
+          {/* <button className="btn btn-ghost btn-sm" onClick={handleDeleteAll} title="Delete all sessions" style={{ color: 'var(--status-error)', padding: '4px' }}>
+            <VscTrash size={16} />
+          </button> */}
+          <button className="btn btn-ghost btn-sm" onClick={loadSessions} title="Refresh sessions" style={{ padding: '4px' }}>
+            <VscRefresh size={16} />
           </button>
         </div>
       </div>
@@ -75,9 +110,33 @@ export default function SessionSidebar({ currentSessionId, onSelectSession, refr
               id={`session-${session.id}`}
             >
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                <div className="prompt-preview" style={{ flex: 1, paddingRight: '12px', marginBottom: 0, minWidth: 0 }}>
-                  {session.prompt}
-                </div>
+                {editingSessionId === session.id ? (
+                  <input
+                    autoFocus
+                    type="text"
+                    value={editNameValue}
+                    onChange={(e) => setEditNameValue(e.target.value)}
+                    onKeyDown={(e) => handleEditKeyDown(e, session.id)}
+                    onBlur={(e) => handleEditSubmit(e, session.id)}
+                    style={{ flex: 1, marginRight: '8px', background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--accent-primary)', borderRadius: '4px', padding: '2px 6px', fontSize: '0.85rem', outline: 'none' }}
+                    onClick={(e) => e.stopPropagation()}
+                  />
+                ) : (
+                  <div className="prompt-preview" style={{ flex: 1, paddingRight: '4px', marginBottom: 0, minWidth: 0, display: 'flex', alignItems: 'center' }}>
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }} title={session.name || session.prompt}>
+                      {session.name || session.prompt}
+                    </span>
+                    <button 
+                      onClick={(e) => handleEditClick(e, session)}
+                      style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: '0 4px', opacity: 0.6, flexShrink: 0, display: 'flex', alignItems: 'center' }}
+                      onMouseEnter={(e) => e.currentTarget.style.opacity = 1}
+                      onMouseLeave={(e) => e.currentTarget.style.opacity = 0.6}
+                      title="Rename Task"
+                    >
+                      <VscEdit size={14} />
+                    </button>
+                  </div>
+                )}
                 <span className={`status-dot ${session.status}`} title={`Status: ${session.status}`} style={{ flexShrink: 0, marginTop: '4px' }}></span>
               </div>
               <div className="session-meta" style={{ marginTop: 'var(--space-xs)', justifyContent: 'flex-end' }}>

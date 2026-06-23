@@ -36,6 +36,8 @@
   padding: var(--space-xs) 0;
   border-bottom: 1px solid var(--surface-border);
   background: var(--bg-secondary);
+  max-height: 30vh;
+  overflow-y: auto;
 }
 
 .diff-file-row {

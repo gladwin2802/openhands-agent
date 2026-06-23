@@ -9,7 +9,7 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -23,7 +23,9 @@ import database
 import event_bus
 import agent_runner
 import diff_engine
+import metrics_parser
 from file_watcher import FileWatcher
+from instructions.generate_task_file import generate_task_file
 
 # Hardcoded workspace path
 WORKSPACE_PATH = "C:/Users/Gladwin.aj/Downloads/workspace"
@@ -78,10 +80,20 @@ app.add_middleware(
 class RunRequest(BaseModel):
     prompt: str
     workspace_path: str | None = None
+    target_project: str | None = None
+    init_bundle: bool = False
+    default_catalog: str | None = None
+    personal_schema: str | None = None
+    language: str | None = None
+    task_file: str | None = None
 
 
 class WriteFileRequest(BaseModel):
     content: str
+
+
+class UpdateSessionNameRequest(BaseModel):
+    name: str
 
 
 # --------------- Session Endpoints ---------------
@@ -93,7 +105,8 @@ async def create_and_run_session(req: RunRequest):
     ws_path = os.path.abspath(ws_path)
     os.makedirs(ws_path, exist_ok=True)
     
-    session = await database.create_session(req.prompt, ws_path)
+    task_name = req.task_file.replace('.txt', '') if req.task_file else None
+    session = await database.create_session(req.prompt, ws_path, name=task_name)
 
     # Set file watcher to emit events for this session
     if file_watcher:
@@ -101,15 +114,95 @@ async def create_and_run_session(req: RunRequest):
         file_watcher.update_path(ws_path, session["id"], loop)
 
     # Start agent in background
-    await agent_runner.start_agent(session["id"], req.prompt, ws_path)
+    await agent_runner.start_agent(
+        session["id"], 
+        req.prompt, 
+        ws_path,
+        target_project=req.target_project,
+        init_bundle=req.init_bundle,
+        default_catalog=req.default_catalog,
+        personal_schema=req.personal_schema,
+        language=req.language
+    )
 
     return session
+
+
+@app.post("/api/metadata/upload")
+async def upload_metadata(file: UploadFile = File(...), workspace_path: str = Form(None)):
+    """Upload a metadata file, save it to the workspace, and generate the task."""
+    if not workspace_path:
+        workspace_path = WORKSPACE_PATH
+        
+    ws_path = os.path.abspath(workspace_path)
+    os.makedirs(ws_path, exist_ok=True)
+    
+    backend_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # Save metadata to backend/instructions/metadata/
+    metadata_dir = os.path.join(backend_dir, "instructions", "metadata")
+    os.makedirs(metadata_dir, exist_ok=True)
+    metadata_path_str = os.path.join(metadata_dir, file.filename)
+    
+    content = await file.read()
+    with open(metadata_path_str, "wb") as f:
+        f.write(content)
+        
+    # Generate task in backend/instructions/tasks/
+    tasks_dir = os.path.join(backend_dir, "instructions", "tasks")
+    os.makedirs(tasks_dir, exist_ok=True)
+    
+    # Map metadata_*.json -> task_*.txt
+    derived_task_name = file.filename.replace("metadata_", "task_").replace(".json", ".txt")
+    if derived_task_name == file.filename:
+        derived_task_name = f"task_{file.filename.replace('.json', '.txt')}"
+        
+    task_path_str = os.path.join(tasks_dir, derived_task_name)
+    
+    try:
+        generate_task_file(Path(metadata_path_str), Path(task_path_str), ws_path)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate task file: {str(e)}")
+        
+    with open(task_path_str, "r", encoding="utf-8") as f:
+        task_content = f.read()
+        
+    return {"status": "success", "task_content": task_content, "task_file": derived_task_name}
 
 
 @app.get("/api/sessions")
 async def list_sessions():
     """List all sessions."""
     return await database.get_sessions()
+
+
+@app.get("/api/metrics")
+async def get_metrics(path: str = None):
+    """Parse and return OpenHands metrics."""
+    # Default to the backend's .agent_runs directory if none provided
+    backend_dir = os.path.dirname(os.path.abspath(__file__))
+    target_path = path or os.path.join(backend_dir, ".agent_runs")
+    
+    try:
+        data = metrics_parser.analyze_runs(target_path)
+        
+        # Inject task name from database
+        sessions = await database.get_sessions()
+        session_map = {}
+        for s in sessions:
+            session_map[s["id"]] = s.get("name")
+            session_map[s["id"].replace("-", "")] = s.get("name")
+            
+        for run in data.get("detailed_runs", []):
+            run["task_name"] = session_map.get(run["id"])
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to parse metrics: {str(e)}")
+        
+    if "error" in data:
+        raise HTTPException(status_code=400, detail=data["error"])
+        
+    return data
 
 
 @app.delete("/api/sessions")
@@ -132,6 +225,16 @@ async def get_session(session_id: str):
         file_watcher.update_path(session["workspace_path"], session_id, loop)
         
     return session
+
+
+@app.put("/api/sessions/{session_id}/name")
+async def update_session_name(session_id: str, req: UpdateSessionNameRequest):
+    """Update the user-defined name of a session."""
+    session = await database.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    await database.update_session_name(session_id, req.name)
+    return {"status": "success", "name": req.name}
 
 
 @app.get("/api/sessions/{session_id}/events")
@@ -173,6 +276,9 @@ def _walk_files(base_path: str, workspace_root: str) -> list:
     except OSError:
         return result
 
+    dirs = []
+    files = []
+    
     for entry in entries:
         full_path = os.path.join(base_path, entry)
         rel_path = os.path.relpath(full_path, workspace_root)
@@ -181,20 +287,20 @@ def _walk_files(base_path: str, workspace_root: str) -> list:
             if entry in IGNORE_DIRS:
                 continue
             children = _walk_files(full_path, workspace_root)
-            result.append({
+            dirs.append({
                 "name": entry,
                 "path": rel_path,
                 "type": "directory",
                 "children": children,
             })
         else:
-            result.append({
+            files.append({
                 "name": entry,
                 "path": rel_path,
                 "type": "file",
             })
 
-    return result
+    return dirs + files
 
 
 @app.get("/api/files")

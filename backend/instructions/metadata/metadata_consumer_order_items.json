@@ -1,0 +1,90 @@
+{
+  "$schema": "./metadata_schema.json",
+  "schema_version": "2.0",
+  "entity": {
+    "name": "consumer_order_items",
+    "domain": "cpg",
+    "description": "Consumer order item details processed through landing, bronze, and silver Lakeflow layers.",
+    "source_system": "cpg_seed_data",
+    "business_grain": "one record per order_item_id",
+    "primary_keys": [ "order_item_id" ]
+  },
+  "job": {
+    "name_template": "{entity_name}_workflow",
+    "trigger": {
+      "type": "file_arrival",
+      "settings": {
+        "path_template": "/Volumes/{catalog}/{pipeline_schema}/{volume}/{entity_name}/"
+      }
+    },
+    "pipeline_flow": [
+      { "pipeline": "bronze", "depends_on": [] },
+      { "pipeline": "silver", "depends_on": [ "bronze" ] }
+    ]
+  },
+  "source": {
+    "format": "json",
+    "reader_options": {
+      "multiLine": true
+    },
+    "schema": [
+      { "name": "order_item_id", "type": "integer", "nullable": false, "primary_key": true },
+      { "name": "order_id", "type": "integer", "nullable": false },
+      { "name": "product_id", "type": "integer", "nullable": false },
+      { "name": "quantity", "type": "integer", "nullable": false },
+      { "name": "unit_price", "type": "double", "nullable": false },
+      { "name": "total_price", "type": "double", "nullable": false },
+      { "name": "operation", "type": "string", "nullable": false }
+    ]
+  },
+  "processing_rules": {
+    "cdc": {
+      "enabled": true,
+      "type": "scd2",
+      "keys": [ "order_item_id" ],
+      "sequence_by": "ingestion_time",
+      "operation_column": "operation",
+      "delete_value": "delete"
+    },
+    "layers": {
+      "landing": {
+        "generated_columns": [
+          { "name": "ingestion_time", "type": "timestamp", "expression": "current_timestamp()" }
+        ]
+      },
+      "bronze": {
+        "source_table": "{entity_name}_cdc_stream",
+        "target_view": "{entity_name}_mv",
+        "quality": "bronze",
+        "filters": [ "__START_AT IS NOT NULL AND __END_AT IS NULL" ],
+        "drop_columns": [ "operation", "ingestion_time", "__START_AT", "__END_AT", "__OPERATION" ]
+      },
+      "silver": {
+        "source_view": "{entity_name}_mv",
+        "target_view": "{entity_name}_mv",
+        "quality": "silver",
+        "expectations": [
+          { "name": "valid_order_item_id", "expression": "order_item_id IS NOT NULL", "action": "drop" }
+        ],
+        "transformations": []
+      }
+    }
+  },
+  "runtime_config": {
+    "required_keys": [
+      { "name": "catalog", "type": "string", "required": true },
+      { "name": "pipeline_schema", "type": "string", "required": true },
+      { "name": "volume", "type": "string", "required": true },
+      { "name": "target_schema", "type": "string", "required": true }
+    ]
+  },
+  "relationships": [
+    {
+      "name": "fk_order_items_to_order",
+      "relationship_type": "many_to_one",
+      "local_keys": ["order_id"],
+      "referenced_entity": "consumer_order",
+      "referenced_keys": ["order_id"]
+    }
+  ]
+}

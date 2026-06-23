@@ -1,4 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import { stopSession } from '../api';
 
 const Chevron = ({ expanded }) => (
   <svg 
@@ -29,6 +32,9 @@ const renderSubEventContent = (event) => {
   if (event.event_type === 'activity') {
     return <span className="sub-event-item" style={{ color: 'var(--text-secondary)' }}>{payload.content || ''}</span>;
   }
+  if (event.event_type === 'task_update') {
+    return <span className="sub-event-item" style={{ whiteSpace: 'pre-wrap', fontFamily: 'var(--font-mono)' }}>{payload.content || ''}</span>;
+  }
   return <span className="sub-event-item">{JSON.stringify(payload)}</span>;
 };
 
@@ -40,6 +46,7 @@ const ActionSubGroup = ({ type, events }) => {
   else if (type === 'terminal') title = `Executed ${events.length} terminal action${events.length > 1 ? 's' : ''}`;
   else if (type === 'error') title = `Encountered ${events.length} error${events.length > 1 ? 's' : ''}`;
   else if (type === 'activity') title = `${events.length} Action${events.length > 1 ? 's' : ''}`;
+  else if (type === 'task_update') title = `Task list updated (${events.length} event${events.length > 1 ? 's' : ''})`;
   else title = `${events.length} ${type} event${events.length > 1 ? 's' : ''}`;
 
   return (
@@ -80,20 +87,111 @@ const ThoughtGroup = ({ content }) => {
   );
 };
 
+const SuperGroup = ({ items }) => {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div className="action-group">
+      <div className="action-group-header" onClick={() => setExpanded(!expanded)}>
+        <Chevron expanded={expanded} />
+        <span>{items.length} Background Steps</span>
+      </div>
+      {expanded && (
+        <div className="action-group-content" style={{ paddingLeft: '8px', borderLeft: '1px solid var(--surface-border)', marginLeft: '6px' }}>
+          {items.map((item, idx) => {
+            if (item.type === 'thought') {
+              return <ThoughtGroup key={idx} content={item.content} />;
+            } else {
+              return <ActionSubGroup key={idx} type={item.type} events={item.events} />;
+            }
+          })}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const parseTasks = (content) => {
+  if (!content) return [];
+  const lines = content.split('\n');
+  const tasks = [];
+  let currentTask = null;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    // Match line like: ✅ 1. Explore workspace...
+    // We use a regex that looks for optional non-word chars, then a number, then a dot.
+    const match = line.match(/^([^\w\s]*)\s*(\d+)\.\s+(.*)$/);
+    if (match) {
+      if (currentTask) tasks.push(currentTask);
+      currentTask = {
+        icon: match[1].trim(),
+        id: match[2],
+        title: match[3].trim(),
+        notes: ''
+      };
+    } else if (currentTask) {
+      // If it's a notes line
+      const notesMatch = line.match(/^\s*Notes:\s*(.*)$/i);
+      if (notesMatch) {
+        currentTask.notes = notesMatch[1].trim();
+      } else if (line.trim() !== '' && !line.includes('Task list updated')) {
+        // Append to notes if it's a continuation
+        if (currentTask.notes) currentTask.notes += '\n' + line.trim();
+        else currentTask.notes = line.trim();
+      }
+    }
+  }
+  if (currentTask) tasks.push(currentTask);
+  return tasks;
+};
+
 /**
  * Activity panel showing hierarchical agent actions and messages.
  */
-export default function ActivityPanel({ events, agentStatus }) {
+export default function ActivityPanel({ events, agentStatus, sessionId }) {
   const bottomRef = useRef(null);
   const [activeTab, setActiveTab] = useState('activity');
 
   const filteredEvents = events.filter(e => 
     e.event_type !== 'terminal' && 
-    e.event_type !== 'status' &&
-    e.event_type !== 'task_update'
+    e.event_type !== 'status'
   );
 
-  const latestTaskEvent = events.filter(e => e.event_type === 'task_update').pop();
+  const taskSets = [];
+  events.filter(e => e.event_type === 'task_update').forEach(e => {
+    const parsed = parseTasks(e.payload?.content);
+    if (parsed.length === 0) return;
+    
+    let isNewSet = false;
+    if (taskSets.length > 0) {
+      const currentSet = taskSets[taskSets.length - 1];
+      for (const task of parsed) {
+        const existing = currentSet.get(task.id);
+        // If a task with the same ID has a completely different title, the agent started a new task set
+        if (existing && existing.title.trim().toLowerCase() !== task.title.trim().toLowerCase()) {
+          isNewSet = true;
+          break;
+        }
+      }
+    } else {
+      isNewSet = true;
+    }
+    
+    if (isNewSet) {
+      const newSet = new Map();
+      for (const task of parsed) {
+        newSet.set(task.id, task);
+      }
+      taskSets.push(newSet);
+    } else {
+      const currentSet = taskSets[taskSets.length - 1];
+      for (const task of parsed) {
+        currentSet.set(task.id, task);
+      }
+    }
+  });
+
+  const taskSetsList = taskSets.map(map => Array.from(map.values()).sort((a, b) => parseInt(a.id) - parseInt(b.id)));
 
   useEffect(() => {
     if (activeTab === 'activity') {
@@ -157,13 +255,60 @@ export default function ActivityPanel({ events, agentStatus }) {
   }
   if (currentGroup) displayItems.push(currentGroup);
 
+  const finalDisplayItems = [];
+  let currentSuperGroup = [];
+
+  for (const item of displayItems) {
+    if (item.type === 'message') {
+      if (currentSuperGroup.length > 5) {
+        finalDisplayItems.push({ type: 'super_group', items: currentSuperGroup });
+      } else {
+        finalDisplayItems.push(...currentSuperGroup);
+      }
+      currentSuperGroup = [];
+      finalDisplayItems.push(item);
+    } else {
+      currentSuperGroup.push(item);
+    }
+  }
+  
+  if (currentSuperGroup.length > 5) {
+    finalDisplayItems.push({ type: 'super_group', items: currentSuperGroup });
+  } else {
+    finalDisplayItems.push(...currentSuperGroup);
+  }
+
   return (
     <div className="activity-panel" id="activity-panel">
       <div className="panel-header">
-        <div style={{ display: 'flex', alignItems: 'center', gap: '24px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <h3>Activity</h3>
-            <span className={`status-dot ${agentStatus}`} title={`Status: ${agentStatus}`}></span>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span className={`status-dot ${agentStatus}`} title={`Status: ${agentStatus}`}></span>
+              <h3>Activity</h3>
+            </div>
+            {agentStatus === 'running' && sessionId && (
+              <button 
+                onClick={async () => {
+                  try {
+                    await stopSession(sessionId);
+                  } catch (e) {
+                    console.error("Failed to stop session", e);
+                  }
+                }}
+                className="stop-action-btn"
+                style={{
+                  background: 'var(--status-error)', color: '#fff', border: 'none', 
+                  borderRadius: '50%', width: '24px', height: '24px', padding: '0',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer',
+                  boxShadow: '0 2px 8px rgba(220, 38, 38, 0.4)',
+                  position: 'relative'
+                }}
+                title="Stop Agent Execution"
+              >
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"></rect></svg>
+              </button>
+            )}
           </div>
           <div style={{ display: 'flex', background: 'var(--bg-tertiary)', borderRadius: 'var(--radius-sm)', padding: '2px', gap: '2px' }}>
             <button 
@@ -192,11 +337,8 @@ export default function ActivityPanel({ events, agentStatus }) {
             </button>
           </div>
         </div>
-        <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
-          {activeTab === 'activity' ? `${displayItems.length} items` : ''}
-        </span>
       </div>
-      <div className="panel-content" style={{ padding: 'var(--space-md) 0' }}>
+      <div className="panel-content" style={{ padding: 'var(--space-md) 0', overflowY: 'auto' }}>
         {activeTab === 'activity' ? (
           <>
             {displayItems.length === 0 ? (
@@ -214,16 +356,22 @@ export default function ActivityPanel({ events, agentStatus }) {
                 )}
               </div>
             ) : (
-              displayItems.map((item, idx) => {
+              finalDisplayItems.map((item, idx) => {
                 if (item.type === 'message') {
                   return (
                     <div key={idx} className={`message-turn ${item.role}`}>
                       <div style={{ fontWeight: 600, color: item.role === 'user' ? 'var(--accent-primary-hover)' : 'var(--text-accent)', marginBottom: '4px' }}>
                         {item.role === 'user' ? '👤 You' : '🤖 Agent'}
                       </div>
-                      <div style={{ paddingLeft: '2px' }}>{item.content}</div>
+                      <div className="markdown-body" style={{ paddingLeft: '2px' }}>
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                          {item.content}
+                        </ReactMarkdown>
+                      </div>
                     </div>
                   );
+                } else if (item.type === 'super_group') {
+                  return <SuperGroup key={idx} items={item.items} />;
                 } else if (item.type === 'thought') {
                   return <ThoughtGroup key={idx} content={item.content} />;
                 } else {
@@ -241,8 +389,93 @@ export default function ActivityPanel({ events, agentStatus }) {
             <div ref={bottomRef} />
           </>
         ) : (
-          <div className="tasks-content" style={{ padding: '0 16px', fontFamily: 'var(--font-mono)', fontSize: '0.9rem', whiteSpace: 'pre-wrap', color: 'var(--text-primary)' }}>
-            {latestTaskEvent ? latestTaskEvent.payload?.content : 'No tasks created yet.'}
+          <div className="tasks-content" style={{ padding: '16px 24px', fontFamily: 'var(--font-sans)', color: 'var(--text-primary)' }}>
+            {taskSetsList.length === 0 ? (
+              <div style={{ color: 'var(--text-muted)' }}>No tasks created yet.</div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '48px' }}>
+                {taskSetsList.map((tasks, setIdx) => (
+                  <div key={setIdx} className="task-set-container">
+                    {taskSetsList.length > 1 && (
+                      <h3 style={{ 
+                        marginBottom: '24px', 
+                        color: 'var(--text-secondary)', 
+                        fontSize: '0.9rem', 
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.05em',
+                        borderBottom: '1px solid var(--surface-border)', 
+                        paddingBottom: '8px' 
+                      }}>
+                        Task Set {setIdx + 1}
+                      </h3>
+                    )}
+                    <div style={{ display: 'flex', flexDirection: 'column' }}>
+                      {tasks.map((task, idx, arr) => {
+                        const isDone = task.icon.includes('✅') || task.icon.includes('x') || task.icon.includes('X');
+                        const isPending = task.icon.includes('⏳') || task.icon.includes('-');
+                        const isLast = idx === arr.length - 1;
+                        
+                        return (
+                          <div key={idx} style={{ display: 'flex', gap: '16px', position: 'relative', paddingBottom: isLast ? '0' : '24px' }}>
+                            {/* Vertical line connecting nodes */}
+                            {!isLast && (
+                              <div style={{
+                                position: 'absolute',
+                                top: '24px',
+                                bottom: '0',
+                                left: '11px',
+                                width: '2px',
+                                background: isDone ? 'var(--status-success)' : '#444',
+                                zIndex: 0
+                              }} />
+                            )}
+                            
+                            {/* Node Icon */}
+                            <div style={{
+                              width: '24px',
+                              height: '24px',
+                              borderRadius: '50%',
+                              background: isDone ? 'var(--status-success)' : isPending ? '#d97706' : '#444',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              zIndex: 1,
+                              border: '2px solid var(--bg-primary)',
+                              fontSize: '12px',
+                              color: '#fff',
+                              flexShrink: 0
+                            }}>
+                              {isDone ? '✓' : isPending ? '⏳' : ''}
+                            </div>
+                            
+                            {/* Content */}
+                            <div style={{ flex: 1, paddingTop: '2px' }}>
+                              <div style={{ fontWeight: 600, color: isDone ? 'var(--text-primary)' : 'var(--text-secondary)' }}>
+                                {task.id}. {task.title}
+                              </div>
+                              {task.notes && (
+                                <div style={{ 
+                                  marginTop: '8px', 
+                                  padding: '12px', 
+                                  background: 'var(--bg-tertiary)', 
+                                  borderRadius: '6px',
+                                  fontSize: '0.85rem',
+                                  color: 'var(--text-muted)',
+                                  whiteSpace: 'pre-wrap',
+                                  border: '1px solid #333'
+                                }}>
+                                  {task.notes}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </div>

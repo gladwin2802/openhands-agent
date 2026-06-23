@@ -1,0 +1,408 @@
+# Databricks Lakeflow & Asset Bundles Knowledge Base
+
+This document provides syntax and configuration details for implementing Databricks Asset Bundles (DABs), Lakeflow pipelines (DLT), and Workflow Jobs with file arrival triggers.
+
+---
+
+## 1. Databricks Asset Bundles (DABs) Configuration (`databricks.yml`)
+
+### Core Structure
+```yaml
+bundle:
+  name: demo
+  uuid: f3729d75-7e1d-44c6-977f-cbd544c5c66e
+
+include:
+  - resources/*.yml
+  - resources/*/*.yml
+  - resources/*/*/*.yml
+
+variables:
+  catalog:
+    default: ${bundle.target}
+  schema:
+    default: demo
+  input_volume:
+    default: data
+
+targets:
+  dev:
+    default: true
+    mode: development
+    variables:
+      catalog: dev_catalog
+```
+
+### Resource Definitions
+Resources are typically defined in separate YAML files under `resources/`.
+- **Pipelines**: Defined under `resources.pipelines`.
+- **Jobs**: Defined under `resources.jobs`.
+
+#### Pipeline Resource Definition Example (YAML)
+```yaml
+resources:
+  pipelines:
+    my_pipeline:
+      name: my_pipeline
+      target: my_target
+      catalog: ${var.catalog}
+      serverless: true
+      libraries:
+        - file:
+            path: ../../../src/my_entity/my_bronze/transformations/landing.py
+        - file:
+            path: ../../../src/my_entity/my_bronze/transformations/bronze.py
+      configuration:
+        catalog: ${var.catalog}
+        pipeline_schema: ${var.pipeline_schema}
+        volume: ${var.volume}
+        target_schema: my_target
+```
+*Note*: Always specify raw Python transformation scripts (`.py` files) using the `- file:` parameter. Use `- notebook:` only for Jupyter Notebooks (`.ipynb`) or files containing `# Databricks notebook source` headers.
+
+---
+
+## 2. Lakeflow / Delta Live Tables (DLT) Syntax (Python)
+
+### Basic Table and View
+```python
+import dlt
+from pyspark.sql.functions import col, trim
+
+@dlt.table(
+    name="my_table",
+    comment="Description of the table",
+    table_properties={"quality": "bronze"}
+)
+def my_table_definition():
+    return spark.readStream.format("cloudFiles").option("cloudFiles.format", "json") .load(path)
+
+@dlt.view
+def my_view():
+    return dlt.read("my_table").filter(col("active") == True)
+```
+*Note*: Always use `dlt.read("dataset_name")` in Python to read a dataset created in the same pipeline (do NOT use legacy `spark.read.table("LIVE.dataset_name")`).
+
+### Expectations (Data Quality)
+```python
+@dlt.expect("valid_id", "id IS NOT NULL")
+@dlt.expect_or_drop("valid_date", "date > '2020-01-01'")
+@dlt.expect_or_fail("critical_field", "field IS NOT NULL")
+```
+
+### Configuration Access
+Fetch variables dynamically from `spark.conf` using the active `SparkSession`. Ensure `SparkSession` is imported correctly from `pyspark.sql` (NOT `pyspark.sql.functions`). Use the correct keys matching the pipeline configuration block:
+```python
+from pyspark.sql import SparkSession
+
+spark = SparkSession.getActiveSession()
+catalog = spark.conf.get("catalog")
+pipeline_schema = spark.conf.get("pipeline_schema")
+volume = spark.conf.get("volume")
+target_schema = spark.conf.get("target_schema")
+```
+
+### Primary Key Constraints in DLT (Python)
+In Delta Live Tables (DLT), primary key constraints are informational and unenforced by default. 
+To specify a primary key constraint, you MUST declare it within the `@dlt.table` decorator by passing a DDL-formatted schema string. Do NOT run `spark.sql("ALTER TABLE ...")` at the module level in your Python files. Executing DDL commands at the module level runs during pipeline compilation (import time) and causes table-not-found or run-time errors since the table or session is not fully ready.
+
+Example:
+```python
+@dlt.table(
+    schema="""
+        distributor_id INT NOT NULL PRIMARY KEY,
+        distributor_name STRING,
+        phone_number STRING,
+        street_address STRING,
+        postal_code STRING,
+        city STRING,
+        state STRING,
+        country STRING
+    """,
+    name="distributor_mv",
+    comment="Silver materialized view with primary key constraint",
+    table_properties={"quality": "silver"}
+)
+def distributor_mv():
+    df = spark.read.table(...)
+    # Apply transformations...
+    return df
+```
+
+---
+
+## 3. Change Data Capture (CDC) & SCD Type 2
+
+### Using `dlt.apply_changes` (Traditional DLT)
+```python
+import dlt
+
+dlt.create_streaming_table("target_table")
+
+dlt.apply_changes(
+  target = "target_table",
+  source = "source_stream",
+  keys = ["id"],
+  sequence_by = col("timestamp"),
+  apply_as_deletes = col("operation") == "DELETE",
+  except_column_list = ["operation"],
+  stored_as_scd_type = 2  # 1 for Type 1, 2 for Type 2
+)
+```
+*CRITICAL*: Do NOT decorate the function calling `dlt.apply_changes` with `@dlt.table` and return its output. `dlt.apply_changes` does not return a DataFrame. Instead, create the streaming table first and apply changes at the module level (outside of any decorated function).
+
+### Using `create_auto_cdc_flow` (Lakeflow SDP)
+*Note: Newer API mentioned in 2026 documentation.*
+```python
+from pyspark import pipelines as dp
+
+dp.create_streaming_table("target_table")
+dp.create_auto_cdc_flow(
+  target = "target_table",
+  source = "source_view",
+  keys = ["id"],
+  sequence_by = col("timestamp"),
+  stored_as_scd_type = 2
+)
+```
+
+---
+
+## 4. Workflow Jobs & File Arrival Triggers
+
+### Job Definition (YAML)
+```yaml
+resources:
+  jobs:
+    my_job:
+      name: my_job_name
+      trigger:
+        pause_status: UNPAUSED
+        file_arrival:
+          url: /Volumes/catalog/schema/volume/path/
+      tasks:
+        - task_key: bronze_task
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.bronze_pipeline.id}
+        - task_key: silver_task
+          depends_on:
+            - task_key: bronze_task
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.silver_pipeline.id}
+      queue:
+        enabled: true
+```
+
+### Dynamic Value References
+- `{{job.trigger.file_arrival.url}}`: The path that triggered the job.
+
+### Resource Path Flattening Rule
+> [!IMPORTANT]
+> **Reference Flat Keys, Not Folder Structure:**
+> When Databricks Asset Bundles compile, all YAML resource files under the `resources/` folder are merged into a single flat namespace. Physical folder structure (e.g. `resources/pipelines/consumer/consumer_bronze_pipeline.yml`) **does not** create a sub-key namespace in the resource map.
+> * **Incorrect:** `pipeline_id: ${resources.pipelines.consumer.consumer_bronze_pipeline.id}`
+> * **Correct:** `pipeline_id: ${resources.pipelines.consumer_bronze_pipeline.id}`
+
+---
+
+## 5. Materialized Views (SQL & Serverless)
+
+### SQL Syntax
+```sql
+CREATE OR REPLACE MATERIALIZED VIEW my_mv
+SCHEDULE CRON '0 0 * * * ?' AT TIME ZONE 'UTC'
+AS SELECT ... FROM ...;
+
+-- Manual Refresh
+REFRESH MATERIALIZED VIEW my_mv;
+REFRESH MATERIALIZED VIEW my_mv ASYNC;
+```
+
+### Refresh Policies
+- `TRIGGER ON UPDATE`: Refreshes automatically when source data changes.
+- `SCHEDULE EVERY 1 DAY`: Periodic refresh.
+
+---
+
+## 6. Rules for Adding a New Data File / Entity to the Project
+When adding a new source data file or entity to the project (e.g. `product`, `inventory`), the following files must be updated to keep orchestration in sync:
+
+1. **New Entity Metadata (`instructions/metadata/metadata_<entity_name>.json`):** 
+   Create the metadata configuration specifying schema, trigger, CDC rules, and expectations.
+
+2. **Project Metadata (`instructions/metadata/project_metadata.json`):**
+   - Add the entity details (name, folder path, and job resource name) to the `bootstrap.entities` array.
+   - Add a corresponding orchestration task to `bootstrap.dependency_graph` under the correct dependency sequence.
+
+3. **Setup Notebook (`demo/src/bootstrap/setup.ipynb`):**
+   - Append the new entity and its target volume directory path to the `input_file_paths` Python dictionary so it is automatically created at startup.
+
+4. **Bootstrap Workflow Job (`demo/resources/jobs/bootstrap_job.yml`):**
+   - Add the new task to run the entity's workflow job (using the `run_job_task` type) and specify its execution dependencies (using `depends_on`).
+
+---
+
+## 7. Base Bootstrap Templates
+
+If building a fresh project (e.g. `demo2`) or if base bootstrap files are missing, the following templates define the setup notebook and bootstrap job structure:
+
+### 1. Base Setup Notebook Template (`setup.ipynb` - JSON Format)
+Create this file at `src/bootstrap/setup.ipynb` as a JSON notebook:
+```json
+{
+ "cells": [
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Databricks notebook source\n",
+    "dbutils.widgets.text(\"volume\", \"data\")\n",
+    "dbutils.widgets.text(\"catalog\", \"dev\")\n",
+    "dbutils.widgets.text(\"landing_schema\", \"00_landing\")\n",
+    "dbutils.widgets.text(\"bronze_schema\", \"01_bronze\")\n",
+    "dbutils.widgets.text(\"silver_schema\", \"02_silver\")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "volume=dbutils.widgets.get(\"volume\")\n",
+    "catalog=dbutils.widgets.get(\"catalog\")\n",
+    "landing_schema=dbutils.widgets.get(\"landing_schema\")\n",
+    "bronze_schema=dbutils.widgets.get(\"bronze_schema\")\n",
+    "silver_schema=dbutils.widgets.get(\"silver_schema\")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "root_path=f\"/Volumes/{catalog}/{landing_schema}/{volume}/\"\n",
+    "input_file_paths = {\n",
+    "    # Entities will be appended here dynamically\n",
+    "}"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "spark.sql(f\"CREATE CATALOG IF NOT EXISTS `{catalog}`\")\n",
+    "spark.sql(f\"CREATE SCHEMA IF NOT EXISTS `{catalog}`.`{landing_schema}`\")\n",
+    "spark.sql(f\"CREATE SCHEMA IF NOT EXISTS `{catalog}`.`{bronze_schema}`\")\n",
+    "spark.sql(f\"CREATE SCHEMA IF NOT EXISTS `{catalog}`.`{silver_schema}`\")\n",
+    "spark.sql(f\"CREATE VOLUME IF NOT EXISTS `{catalog}`.`{landing_schema}`.`{volume}`\")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import os\n",
+    "for entity_path in input_file_paths:\n",
+    "    full_path = os.path.join(root_path, input_file_paths[entity_path])\n",
+    "    if not os.path.exists(full_path):\n",
+    "        os.makedirs(full_path)\n",
+    "        print(f\"Created directory: {full_path}\")"
+   ]
+  }
+ ],
+ "metadata": {
+  "language_info": {
+   "name": "python"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 2
+}
+```
+
+### 2. Base Bootstrap Job Template (`bootstrap_job.yml` - YAML Format)
+Create this file at `resources/jobs/bootstrap_job.yml` with the correct task triggering syntax. Note that task dependencies MUST be specified as a list of maps using `task_key`, and the task type for triggering another job is `run_job_task` with `job_id`:
+```yaml
+resources:
+  jobs:
+    bootstrap_workflow:
+      name: bootstrap_workflow
+      tasks:
+        - task_key: setup
+          notebook_task:
+            notebook_path: ../../src/bootstrap/setup.ipynb
+            base_parameters:
+              catalog: ${var.catalog}
+              landing_schema: ${var.pipeline_schema}
+              volume: ${var.volume}
+              bronze_schema: ${var.bronze_target_schema}
+              silver_schema: ${var.silver_target_schema}
+            source: WORKSPACE
+        # Example of how subsequent entity jobs are sequentially triggered:
+        - task_key: run_consumer_job
+          depends_on:
+            - task_key: setup
+          run_job_task:
+            job_id: ${resources.jobs.consumer_workflow.id}
+      queue:
+        enabled: true
+```
+
+### 3. Base Project Metadata Template (`project_metadata.json` - JSON Format)
+Create this file at `instructions/metadata/project_metadata.json` as a registry metadata document:
+```json
+{
+  "schema_version": "1.0.0",
+  "project_name": "demo",
+  "global_config": {
+    "catalog": "${var.catalog}",
+    "pipeline_schema": "${var.pipeline_schema}",
+    "volume": "${var.volume}",
+    "bronze_target_schema": "${var.bronze_target_schema}",
+    "silver_target_schema": "${var.silver_target_schema}"
+  },
+  "bootstrap": {
+    "job_name": "bootstrap_workflow",
+    "setup_notebook_path": "src/bootstrap/setup.ipynb",
+    "entities": [],
+    "dependency_graph": {
+      "setup": {
+        "task_key": "setup",
+        "task_type": "notebook_task",
+        "notebook_path": "../../src/bootstrap/setup.ipynb",
+        "depends_on": []
+      }
+    }
+  }
+}
+```
+
+---
+
+## 8. Windows Environment (PowerShell) Guidelines
+- The execution environment is Windows PowerShell 5.1.
+- **Do NOT** use bash statement separators like `&&` or `||` in terminal commands. Doing so causes PS parser errors.
+- Always use `;` as a statement separator, or execute commands in separate, sequential runs.
+
+---
+
+## 9. Verification & Logical Correctness Checklist
+Before completing any task, the model must audit all configurations and code files for the following logical errors and correct them immediately:
+
+1. **Bundle Variables Match Reference**: Ensure every configuration variable used in the resources (e.g., `${var.pipeline_schema}`, `${var.volume}`, `${var.bronze_target_schema}`) is declared under the `variables` section in `databricks.yml`. If they are not declared, deployment will fail.
+2. **Inclusion Pattern Resolution**: Ensure `databricks.yml` inclusion patterns recursively search folder paths. For example, use glob patterns like `resources/pipelines/**/*.yml` to match subdirectories.
+3. **Dynamic vs Hardcoded Schema Configurations**:
+   - Verify if configurations like `target_schema` should be dynamic variables (`${var.silver_target_schema}`) or hardcoded values.
+   - Validate that schema resolution in transformation scripts (e.g. `silver.py`) correctly replacement-maps to the parent layer schema. For example, if target_schema is set to `distributor_silver`, then `.replace("_silver", "_bronze")` successfully evaluates to `distributor_bronze`. If target_schema is set to `${var.silver_target_schema}` (which evaluates to `02_silver`), then replacing it yields `02_bronze`, which will fail if the bronze tables reside in `consumer_bronze` or `01_bronze`.
+4. **No Module-Level SQL Execution**: Ensure no Python transformation scripts execute `spark.sql("ALTER TABLE ...")` at the module level.
+5. **Dependency Mapping**: Validate that job configuration dependencies (e.g. `depends_on` tasks) match the orchestration sequence in the metadata files.
+6. **Logical Resource References**: Ensure all referenced pipelines and jobs within the resource configurations (e.g. `pipeline_id: ${resources.pipelines.<name>.id}`) use the flat resource key (like `consumer_bronze_pipeline`) rather than physical directory paths (like `consumer.consumer_bronze_pipeline`).
+

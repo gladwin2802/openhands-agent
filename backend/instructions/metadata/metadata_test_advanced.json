@@ -1,0 +1,99 @@
+{
+  "$schema": "./metadata_schema.json",
+  "schema_version": "2.0",
+  "entity": {
+    "name": "advanced_test",
+    "domain": "cpg",
+    "description": "Entity showcasing nested schemas, custom SQL, and epoch/timezone conversions.",
+    "source_system": "test_system",
+    "business_grain": "one record per test_id",
+    "primary_keys": [ "test_id" ]
+  },
+  "job": {
+    "name_template": "{entity_name}_workflow",
+    "trigger": {
+      "type": "manual"
+    },
+    "pipeline_flow": [
+      { "pipeline": "bronze", "depends_on": [] },
+      { "pipeline": "silver", "depends_on": [ "bronze" ] }
+    ]
+  },
+  "source": {
+    "format": "json",
+    "reader_options": {
+      "multiLine": true
+    },
+    "schema": [
+      { "name": "test_id", "type": "integer", "nullable": false, "primary_key": true },
+      { "name": "device_name", "type": "string", "nullable": true },
+      { "name": "creation_epoch", "type": "long", "nullable": false },
+      { "name": "measurement_tz", "type": "string", "nullable": true },
+      { 
+        "name": "tags", 
+        "type": "array", 
+        "nullable": true,
+        "element_type": "string"
+      },
+      {
+        "name": "sensor_readings",
+        "type": "array",
+        "nullable": true,
+        "fields": [
+          { "name": "sensor_id", "type": "integer", "nullable": false },
+          { "name": "reading_value", "type": "double", "nullable": false },
+          {
+            "name": "calibration",
+            "type": "struct",
+            "nullable": true,
+            "fields": [
+              { "name": "offset", "type": "double", "nullable": true },
+              { "name": "scale", "type": "double", "nullable": true }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "processing_rules": {
+    "cdc": {
+      "enabled": false
+    },
+    "layers": {
+      "landing": {
+        "generated_columns": [
+          { "name": "ingestion_time", "type": "timestamp", "expression": "current_timestamp()" }
+        ]
+      },
+      "bronze": {
+        "source_table": "{entity_name}_raw_stream",
+        "target_view": "{entity_name}_mv",
+        "quality": "bronze",
+        "filters": [],
+        "drop_columns": [ "ingestion_time" ]
+      },
+      "silver": {
+        "source_view": "{entity_name}_mv",
+        "target_view": "{entity_name}_mv",
+        "quality": "silver",
+        "expectations": [
+          { "name": "valid_test_id", "expression": "test_id IS NOT NULL", "action": "drop" }
+        ],
+        "transformations": [
+          { "rule": "trim", "columns": [ "device_name" ] },
+          { "rule": "from_unixtime", "columns": [ "creation_epoch" ], "params": { "is_milliseconds": false } },
+          { "rule": "to_utc_timestamp", "columns": [ "creation_epoch" ], "params": { "timezone": "America/New_York" } },
+          { "rule": "custom_sql", "columns": [ "sensor_summary" ], "params": { "expression": "aggregate(sensor_readings, 0.0, (acc, x) -> acc + x.reading_value)" } }
+        ]
+      }
+    }
+  },
+  "runtime_config": {
+    "required_keys": [
+      { "name": "catalog", "type": "string", "required": true },
+      { "name": "pipeline_schema", "type": "string", "required": true },
+      { "name": "volume", "type": "string", "required": true },
+      { "name": "target_schema", "type": "string", "required": true }
+    ]
+  }
+}
