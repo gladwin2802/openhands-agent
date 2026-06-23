@@ -51,10 +51,11 @@ export default function useAgentSocket(sessionId) {
             const content = data.payload?.content || '';
 
             if (isStreaming && role === 'assistant') {
-              const lastEvent = prev[prev.length - 1];
-              if (lastEvent && lastEvent.event_type === 'message' && lastEvent.payload?.role === 'assistant' && lastEvent.payload?.streaming) {
+              const lastMessageIndex = prev.findLastIndex(e => e.event_type === 'message' && e.payload?.role === 'assistant' && e.payload?.streaming);
+              if (lastMessageIndex !== -1) {
+                const lastEvent = prev[lastMessageIndex];
                 const newPrev = [...prev];
-                newPrev[newPrev.length - 1] = {
+                newPrev[lastMessageIndex] = {
                   ...lastEvent,
                   payload: {
                     ...lastEvent.payload,
@@ -66,10 +67,11 @@ export default function useAgentSocket(sessionId) {
                 return [...prev, data];
               }
             } else if (!isStreaming && role === 'assistant' && prev.length > 0) {
-              const lastEvent = prev[prev.length - 1];
-              if (lastEvent.event_type === 'message' && lastEvent.payload?.role === 'assistant' && lastEvent.payload?.streaming) {
+              const lastMessageIndex = prev.findLastIndex(e => e.event_type === 'message' && e.payload?.role === 'assistant' && e.payload?.streaming);
+              if (lastMessageIndex !== -1) {
+                const lastEvent = prev[lastMessageIndex];
                 const newPrev = [...prev];
-                newPrev[newPrev.length - 1] = {
+                newPrev[lastMessageIndex] = {
                   ...lastEvent,
                   payload: {
                     ...lastEvent.payload,

@@ -22,6 +22,7 @@ from openhands.sdk.event import ActionEvent, ObservationEvent, MessageEvent
 # Track running agent tasks so they can be cancelled
 _running_tasks: dict[str, asyncio.Task] = {}
 _running_conversations = {}
+_stream_buffers: dict[str, str] = {}
 
 def _walk_workspace(workspace_path: str) -> dict[str, str]:
     """
@@ -97,6 +98,16 @@ async def run_openhands_agent(session_id: str, prompt: str, workspace_path: str)
             ],
         )
 
+        orig_step = agent.step
+        def patched_step(*args, **kwargs):
+            action = orig_step(*args, **kwargs)
+            if action and action.__class__.__name__ == "TerminalAction":
+                if hasattr(action, "command") and isinstance(action.command, str):
+                    # PowerShell doesn't support && in this environment, replace with ;
+                    action.command = action.command.replace(" && ", " ; ").replace("&&", ";")
+            return action
+        object.__setattr__(agent, 'step', patched_step)
+
         main_loop = asyncio.get_running_loop()
 
         # 4. Create event callback to map OpenHands events → UI events
@@ -105,6 +116,9 @@ async def run_openhands_agent(session_id: str, prompt: str, workspace_path: str)
             loop = main_loop
 
             if isinstance(event, MessageEvent):
+                if session_id in _stream_buffers:
+                    _stream_buffers.pop(session_id)
+
                 source = getattr(event, "source", "agent")
                 if source == "user":
                     return
@@ -135,14 +149,13 @@ async def run_openhands_agent(session_id: str, prompt: str, workspace_path: str)
             elif isinstance(event, ActionEvent):
                 action = event.action
                 
-                # Emit the final thought as a non-streaming message to seal the token stream
-                thought = getattr(action, "thought", "")
-                if thought:
-                    final_content = f"<think>\n{thought}\n</think>"
+                # Emit the flushed stream buffer as a non-streaming message to seal the token stream and persist it
+                if session_id in _stream_buffers and _stream_buffers[session_id]:
+                    buffered_content = _stream_buffers.pop(session_id)
                     asyncio.run_coroutine_threadsafe(
                         event_bus.emit(session_id, "message", {
                             "role": "assistant",
-                            "content": final_content,
+                            "content": buffered_content,
                             "streaming": False,
                         }),
                         loop,
@@ -176,12 +189,14 @@ async def run_openhands_agent(session_id: str, prompt: str, workspace_path: str)
                 # Check summary or metadata to emit an activity event
                 summary = getattr(event, "summary", "")
                 if summary:
-                    asyncio.run_coroutine_threadsafe(
-                        event_bus.emit(session_id, "activity", {
-                            "content": summary,
-                        }),
-                        loop,
-                    )
+                    # Filter out raw JSON tool calls from cluttering the activity panel
+                    if not summary.startswith("task_tracker: {") and not summary.startswith("file_editor: {"):
+                        asyncio.run_coroutine_threadsafe(
+                            event_bus.emit(session_id, "activity", {
+                                "content": summary,
+                            }),
+                            loop,
+                        )
 
             elif isinstance(event, ObservationEvent):
                 obs = getattr(event, "observation", None)
@@ -242,6 +257,9 @@ async def run_openhands_agent(session_id: str, prompt: str, workspace_path: str)
             for choice in chunk.choices:
                 delta = choice.delta
                 if delta and hasattr(delta, "content") and delta.content:
+                    # Buffer content for persistence
+                    _stream_buffers[session_id] = _stream_buffers.get(session_id, "") + delta.content
+
                     asyncio.run_coroutine_threadsafe(
                         event_bus.emit(session_id, "message", {
                             "role": "assistant",
@@ -290,6 +308,7 @@ async def run_openhands_agent(session_id: str, prompt: str, workspace_path: str)
     finally:
         _running_tasks.pop(session_id, None)
         _running_conversations.pop(session_id, None)
+        _stream_buffers.pop(session_id, None)
 
 
 async def start_agent(session_id: str, prompt: str, workspace_path: str):

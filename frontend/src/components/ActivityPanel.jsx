@@ -39,6 +39,7 @@ const ActionSubGroup = ({ type, events }) => {
   if (type === 'file_changed') title = `Explored ${events.length} file${events.length > 1 ? 's' : ''}`;
   else if (type === 'terminal') title = `Executed ${events.length} terminal action${events.length > 1 ? 's' : ''}`;
   else if (type === 'error') title = `Encountered ${events.length} error${events.length > 1 ? 's' : ''}`;
+  else if (type === 'activity') title = `${events.length} Action${events.length > 1 ? 's' : ''}`;
   else title = `${events.length} ${type} event${events.length > 1 ? 's' : ''}`;
 
   return (
@@ -104,7 +105,7 @@ export default function ActivityPanel({ events, agentStatus }) {
   let currentGroup = null;
 
   for (const e of filteredEvents) {
-    if (e.event_type === 'message' || e.event_type === 'activity') {
+    if (e.event_type === 'message') {
       if (currentGroup) {
         displayItems.push(currentGroup);
         currentGroup = null;
