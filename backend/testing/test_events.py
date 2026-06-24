@@ -7,7 +7,7 @@ from openhands.sdk.event import MessageEvent, ActionEvent, ObservationEvent
 async def main():
     llm = LLM(
         model=os.getenv("LLM_MODEL", "openai/meta/llama-3.1-70b-instruct"),
-        api_key=os.getenv("LLM_API_KEY", ""),
+        api_key=os.getenv("LLM_API_KEY"),
         base_url=os.getenv("LLM_BASE_URL", "https://integrate.api.nvidia.com/v1"),
     )
 

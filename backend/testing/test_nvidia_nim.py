@@ -1,7 +1,7 @@
 import litellm
 import os
 
-api_key = os.environ.get("LLM_API_KEY", "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")
+api_key = os.environ.get("LLM_API_KEY")
 os.environ["NVIDIA_NIM_API_KEY"] = api_key
 
 try:
