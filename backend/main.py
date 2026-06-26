@@ -212,6 +212,30 @@ async def delete_all_sessions():
     return {"status": "success", "message": "All sessions deleted"}
 
 
+@app.delete("/api/sessions/{session_id}")
+async def delete_session_endpoint(session_id: str):
+    """Delete a single session."""
+    session = await database.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+        
+    await database.delete_session(session_id)
+    
+    import shutil
+    backend_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # OpenHands saves runs either with or without hyphens in the directory name
+    for s_id in [session_id, session_id.replace("-", "")]:
+        run_dir = os.path.join(backend_dir, ".agent_runs", s_id)
+        if os.path.exists(run_dir):
+            try:
+                shutil.rmtree(run_dir)
+            except Exception as e:
+                print(f"Failed to delete run directory {run_dir}: {e}")
+
+    return {"status": "success", "message": "Session deleted"}
+
+
 @app.get("/api/sessions/{session_id}")
 async def get_session(session_id: str):
     """Get a single session."""

@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0.0",
-  "project_name": "demo2",
+  "project_name": "demo",
   "global_config": {
     "catalog": "${var.catalog}",
     "pipeline_schema": "${var.pipeline_schema}",
@@ -16,16 +16,6 @@
         "name": "consumer",
         "folder_path": "consumer",
         "job_resource_key": "consumer_workflow"
-      },
-      {
-        "name": "consumer_order",
-        "folder_path": "consumer_order",
-        "job_resource_key": "consumer_order_workflow"
-      },
-      {
-        "name": "consumer_order_items",
-        "folder_path": "consumer_order_items",
-        "job_resource_key": "consumer_order_items_workflow"
       }
     ],
     "dependency_graph": {
@@ -41,22 +31,6 @@
         "job_id": "${resources.jobs.consumer_workflow.id}",
         "depends_on": [
           "setup"
-        ]
-      },
-      "run_consumer_order_job": {
-        "task_key": "run_consumer_order_job",
-        "task_type": "run_job_task",
-        "job_id": "${resources.jobs.consumer_order_workflow.id}",
-        "depends_on": [
-          "run_consumer_job"
-        ]
-      },
-      "run_consumer_order_items_job": {
-        "task_key": "run_consumer_order_items_job",
-        "task_type": "run_job_task",
-        "job_id": "${resources.jobs.consumer_order_items_workflow.id}",
-        "depends_on": [
-          "run_consumer_order_job"
         ]
       }
     }

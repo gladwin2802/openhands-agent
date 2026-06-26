@@ -144,6 +144,16 @@ async def delete_all_sessions():
         await db.commit()
 
 
+async def delete_session(session_id: str):
+    """Delete a single session and associated data."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM file_snapshots WHERE session_id = ?", (session_id,))
+        await db.execute("DELETE FROM changed_files WHERE session_id = ?", (session_id,))
+        await db.execute("DELETE FROM events WHERE session_id = ?", (session_id,))
+        await db.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+        await db.commit()
+
+
 # --------------- Events ---------------
 
 async def save_event(session_id: str, event_type: str, payload: dict) -> dict:

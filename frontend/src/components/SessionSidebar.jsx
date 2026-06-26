@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { getSessions, deleteAllSessions, updateSessionName } from '../api';
+import { getSessions, deleteAllSessions, updateSessionName, deleteSession } from '../api';
 import { VscAdd, VscTrash, VscRefresh, VscEdit } from 'react-icons/vsc';
 
 /**
@@ -79,6 +79,21 @@ export default function SessionSidebar({ currentSessionId, onSelectSession, refr
     }
   };
 
+  const handleDeleteSession = async (e, sessionId) => {
+    e.stopPropagation();
+    if (window.confirm("Are you sure you want to delete this task?")) {
+      try {
+        await deleteSession(sessionId);
+        if (currentSessionId === sessionId) {
+          onSelectSession(null);
+        }
+        loadSessions();
+      } catch (err) {
+        console.error('Failed to delete session:', err);
+      }
+    }
+  };
+
   return (
     <div className="session-sidebar" id="session-sidebar">
       <div className="panel-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -134,6 +149,15 @@ export default function SessionSidebar({ currentSessionId, onSelectSession, refr
                       title="Rename Task"
                     >
                       <VscEdit size={14} />
+                    </button>
+                    <button 
+                      onClick={(e) => handleDeleteSession(e, session.id)}
+                      style={{ background: 'transparent', border: 'none', color: 'var(--status-error)', cursor: 'pointer', padding: '0 4px', opacity: 0.6, flexShrink: 0, display: 'flex', alignItems: 'center' }}
+                      onMouseEnter={(e) => e.currentTarget.style.opacity = 1}
+                      onMouseLeave={(e) => e.currentTarget.style.opacity = 0.6}
+                      title="Delete Task"
+                    >
+                      <VscTrash size={14} />
                     </button>
                   </div>
                 )}

@@ -19,18 +19,47 @@ include:
 
 variables:
   catalog:
+    description: The catalog to use
     default: ${bundle.target}
   schema:
-    default: demo
-  input_volume:
+    description: The schema to use
+    default: ${bundle.target}
+  pipeline_schema:
+    description: The schema for the source volume
+    default: landing
+  volume:
+    description: The volume for source files
     default: data
+  target_schema:
+    description: The target schema for the pipeline layer
+    default: silver
+  bronze_target_schema:
+    description: The target schema for bronze layer
+    default: bronze
+  silver_target_schema:
+    description: The target schema for silver layer
+    default: silver
 
 targets:
   dev:
+    mode: production
     default: true
-    mode: development
-    variables:
-      catalog: dev_catalog
+    workspace:
+      host: https://dbc-94029e02-4197.cloud.databricks.com
+  testing:
+    mode: development 
+    presets:
+      name_prefix: "[${bundle.target} ${workspace.current_user.short_name}] "
+  prod:
+    mode: production
+    presets:
+      name_prefix: "[${bundle.target} ${workspace.current_user.short_name}] "
+    workspace:
+      host: https://dbc-94029e02-4197.cloud.databricks.com
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
+    permissions:
+      - user_name: ${workspace.current_user.userName}
+        level: CAN_MANAGE
 ```
 
 ### Resource Definitions
@@ -62,32 +91,42 @@ resources:
 
 ---
 
-## 2. Lakeflow / Delta Live Tables (DLT) Syntax (Python)
+## 2. Lakeflow Declarative Pipelines (SDP) Syntax (Python)
 
-### Basic Table and View
+### Basic Streaming Table and Materialized View
 ```python
-import dlt
+from pyspark import pipelines as dp
 from pyspark.sql.functions import col, trim
 
-@dlt.table(
-    name="my_table",
-    comment="Description of the table",
-    table_properties={"quality": "bronze"}
-)
-def my_table_definition():
-    return spark.readStream.format("cloudFiles").option("cloudFiles.format", "json") .load(path)
+# Create a streaming table and define its loading flow
+dp.create_streaming_table("my_streaming_table")
 
-@dlt.view
-def my_view():
-    return dlt.read("my_table").filter(col("active") == True)
+@dp.append_flow(target="my_streaming_table")
+def my_streaming_table_flow():
+    return spark.readStream.format("cloudFiles").option("cloudFiles.format", "json").load(path)
+
+# Create a materialized view reading from the streaming table
+catalog_config = spark.conf.get("catalog")
+schema_config = spark.conf.get("target_schema")
+
+@dp.materialized_view(
+    name=f"{catalog_config}.{schema_config}.my_mv",
+    comment="Description of the materialized view"
+)
+def my_mv_definition():
+    return spark.read.table("my_streaming_table").filter(col("active") == True)
 ```
-*Note*: Always use `dlt.read("dataset_name")` in Python to read a dataset created in the same pipeline (do NOT use legacy `spark.read.table("LIVE.dataset_name")`).
+*Note*: Always use `spark.read.table("dataset_name")` in Python to read a dataset created in the same pipeline/package.
 
 ### Expectations (Data Quality)
+In Lakeflow, expectations function as decorators stacked directly on the `@dp.materialized_view` or `@dp.append_flow` function definitions.
 ```python
-@dlt.expect("valid_id", "id IS NOT NULL")
-@dlt.expect_or_drop("valid_date", "date > '2020-01-01'")
-@dlt.expect_or_fail("critical_field", "field IS NOT NULL")
+@dp.expect("valid_id", "id IS NOT NULL")
+@dp.expect_or_drop("valid_date", "date > '2020-01-01'")
+@dp.expect_or_fail("critical_field", "field IS NOT NULL")
+@dp.materialized_view(name=f"{catalog_config}.{schema_config}.my_mv")
+def my_mv():
+    return spark.read.table(...)
 ```
 
 ### Configuration Access
@@ -102,13 +141,13 @@ volume = spark.conf.get("volume")
 target_schema = spark.conf.get("target_schema")
 ```
 
-### Primary Key Constraints in DLT (Python)
-In Delta Live Tables (DLT), primary key constraints are informational and unenforced by default. 
-To specify a primary key constraint, you MUST declare it within the `@dlt.table` decorator by passing a DDL-formatted schema string. Do NOT run `spark.sql("ALTER TABLE ...")` at the module level in your Python files. Executing DDL commands at the module level runs during pipeline compilation (import time) and causes table-not-found or run-time errors since the table or session is not fully ready.
+### Primary Key Constraints (Python)
+In Lakeflow Declarative Pipelines, primary key constraints are informational and unenforced by default. 
+To specify a primary key constraint, you MUST declare it within the `@dp.materialized_view` decorator by passing a DDL-formatted schema string. Do NOT run `spark.sql("ALTER TABLE ...")` at the module level in your Python files.
 
 Example:
 ```python
-@dlt.table(
+@dp.materialized_view(
     schema="""
         distributor_id INT NOT NULL PRIMARY KEY,
         distributor_name STRING,
@@ -119,9 +158,8 @@ Example:
         state STRING,
         country STRING
     """,
-    name="distributor_mv",
-    comment="Silver materialized view with primary key constraint",
-    table_properties={"quality": "silver"}
+    name=f"{catalog_config}.{schema_config}.distributor_mv",
+    comment="Silver materialized view with primary key constraint"
 )
 def distributor_mv():
     df = spark.read.table(...)
@@ -133,38 +171,25 @@ def distributor_mv():
 
 ## 3. Change Data Capture (CDC) & SCD Type 2
 
-### Using `dlt.apply_changes` (Traditional DLT)
-```python
-import dlt
-
-dlt.create_streaming_table("target_table")
-
-dlt.apply_changes(
-  target = "target_table",
-  source = "source_stream",
-  keys = ["id"],
-  sequence_by = col("timestamp"),
-  apply_as_deletes = col("operation") == "DELETE",
-  except_column_list = ["operation"],
-  stored_as_scd_type = 2  # 1 for Type 1, 2 for Type 2
-)
-```
-*CRITICAL*: Do NOT decorate the function calling `dlt.apply_changes` with `@dlt.table` and return its output. `dlt.apply_changes` does not return a DataFrame. Instead, create the streaming table first and apply changes at the module level (outside of any decorated function).
-
 ### Using `create_auto_cdc_flow` (Lakeflow SDP)
-*Note: Newer API mentioned in 2026 documentation.*
+In Lakeflow, we do not use legacy `dlt.apply_changes`. Instead, we create a target streaming table using `dp.create_streaming_table` and then define the CDC flow at module level using `dp.create_auto_cdc_flow`:
+
 ```python
 from pyspark import pipelines as dp
+from pyspark.sql.functions import col, expr
 
-dp.create_streaming_table("target_table")
+dp.create_streaming_table("consumer_cdc_stream")
 dp.create_auto_cdc_flow(
-  target = "target_table",
-  source = "source_view",
-  keys = ["id"],
-  sequence_by = col("timestamp"),
-  stored_as_scd_type = 2
+  source = "consumer_raw_stream",
+  target = "consumer_cdc_stream",
+  name = "cdc_consumer_flow",
+  keys = ["consumer_id"],
+  sequence_by = col("ingestion_time"),
+  apply_as_deletes = expr("operation = 'delete'"),
+  stored_as_scd_type = "2" # Specifies SCD Type 2
 )
 ```
+*CRITICAL*: `dp.create_auto_cdc_flow` is executed at the module level (outside of any decorated function) and does not return a DataFrame.
 
 ---
 
@@ -230,9 +255,9 @@ When adding a new source data file or entity to the project (e.g. `product`, `in
 1. **New Entity Metadata (`instructions/metadata/metadata_<entity_name>.json`):** 
    Create the metadata configuration specifying schema, trigger, CDC rules, and expectations.
 
-2. **Project Metadata (`instructions/metadata/project_metadata.json`):**
-   - Add the entity details (name, folder path, and job resource name) to the `bootstrap.entities` array.
-   - Add a corresponding orchestration task to `bootstrap.dependency_graph` under the correct dependency sequence.
+2. **Metadata Files (`instructions/metadata/project_metadata.json` & `<target_project>/<project_name>_metadata.json`):**
+   - **Global Metadata (`instructions/metadata/project_metadata.json`):** This is a single-run registry. Overwrite this file on every run to only contain the active project name, global config, and the single active entity details (under `bootstrap.entities` and `bootstrap.dependency_graph`).
+   - **Project-Specific Metadata (`<target_project>/<project_name>_metadata.json`):** This is a cumulative registry for that project. Update/append the entity details to the `bootstrap.entities` array and its corresponding orchestration task to the `bootstrap.dependency_graph` (preserving all existing entities and tasks in the sequence).
 
 3. **Setup Notebook (`demo/src/bootstrap/setup.ipynb`):**
    - Append the new entity and its target volume directory path to the `input_file_paths` Python dictionary so it is automatically created at startup.
@@ -260,9 +285,9 @@ Create this file at `src/bootstrap/setup.ipynb` as a JSON notebook:
     "# Databricks notebook source\n",
     "dbutils.widgets.text(\"volume\", \"data\")\n",
     "dbutils.widgets.text(\"catalog\", \"dev\")\n",
-    "dbutils.widgets.text(\"landing_schema\", \"00_landing\")\n",
-    "dbutils.widgets.text(\"bronze_schema\", \"01_bronze\")\n",
-    "dbutils.widgets.text(\"silver_schema\", \"02_silver\")"
+    "dbutils.widgets.text(\"landing_schema\", \"landing\")\n",
+    "dbutils.widgets.text(\"bronze_schema\", \"bronze\")\n",
+    "dbutils.widgets.text(\"silver_schema\", \"silver\")"
    ]
   },
   {
@@ -356,8 +381,9 @@ resources:
         enabled: true
 ```
 
-### 3. Base Project Metadata Template (`project_metadata.json` - JSON Format)
-Create this file at `instructions/metadata/project_metadata.json` as a registry metadata document:
+### 3. Base Project Metadata Templates (JSON Format)
+
+Both the global `instructions/metadata/project_metadata.json` and the project-specific `<target_project>/<project_name>_metadata.json` share the same base JSON structure:
 ```json
 {
   "schema_version": "1.0.0",
@@ -391,18 +417,33 @@ Create this file at `instructions/metadata/project_metadata.json` as a registry 
 - The execution environment is Windows PowerShell 5.1.
 - **Do NOT** use bash statement separators like `&&` or `||` in terminal commands. Doing so causes PS parser errors.
 - Always use `;` as a statement separator, or execute commands in separate, sequential runs.
+- **Do NOT** use multi-line shell commands (`Set-Content`, `Out-File`, `echo`, `cat`) to create or write file contents in the terminal tool, as interactive PowerShell parses newlines inside quotes poorly and will freeze or hang. Always use the dedicated `FileEditor` tool for file modifications.
 
 ---
 
 ## 9. Verification & Logical Correctness Checklist
 Before completing any task, the model must audit all configurations and code files for the following logical errors and correct them immediately:
 
-1. **Bundle Variables Match Reference**: Ensure every configuration variable used in the resources (e.g., `${var.pipeline_schema}`, `${var.volume}`, `${var.bronze_target_schema}`) is declared under the `variables` section in `databricks.yml`. If they are not declared, deployment will fail.
-2. **Inclusion Pattern Resolution**: Ensure `databricks.yml` inclusion patterns recursively search folder paths. For example, use glob patterns like `resources/pipelines/**/*.yml` to match subdirectories.
+1. **Bundle Variables Match Reference**: Ensure every configuration variable used in the resources (e.g., `${var.pipeline_schema}`, `${var.volume}`, `${var.bronze_target_schema}`) is declared under the `variables` section in `databricks.yml`. Additionally, any variable that is overridden or assigned a value under `targets.<target>.variables` (such as `schema: dev`) must also be explicitly declared in the top-level `variables` section of `databricks.yml`. If they are not declared, deployment/validation will fail with: `variable <name> is not defined but is assigned a value`.
+2. **Inclusion Pattern Resolution**: Ensure `databricks.yml` inclusion patterns recursively search folder paths. Always define the explicit list:
+   ```yaml
+   include:
+     - resources/*.yml
+     - resources/*/*.yml
+     - resources/*/*/*.yml
+   ```
 3. **Dynamic vs Hardcoded Schema Configurations**:
    - Verify if configurations like `target_schema` should be dynamic variables (`${var.silver_target_schema}`) or hardcoded values.
-   - Validate that schema resolution in transformation scripts (e.g. `silver.py`) correctly replacement-maps to the parent layer schema. For example, if target_schema is set to `distributor_silver`, then `.replace("_silver", "_bronze")` successfully evaluates to `distributor_bronze`. If target_schema is set to `${var.silver_target_schema}` (which evaluates to `02_silver`), then replacing it yields `02_bronze`, which will fail if the bronze tables reside in `consumer_bronze` or `01_bronze`.
+   - Validate that schema resolution in transformation scripts (e.g. `silver.py`) correctly replacement-maps to the parent layer schema. For example, if target_schema is set to `silver`, then `.replace("silver", "bronze")` successfully evaluates to `bronze`. If target_schema is set to `distributor_silver`, then `.replace("_silver", "_bronze")` successfully evaluates to `distributor_bronze`.
 4. **No Module-Level SQL Execution**: Ensure no Python transformation scripts execute `spark.sql("ALTER TABLE ...")` at the module level.
 5. **Dependency Mapping**: Validate that job configuration dependencies (e.g. `depends_on` tasks) match the orchestration sequence in the metadata files.
 6. **Logical Resource References**: Ensure all referenced pipelines and jobs within the resource configurations (e.g. `pipeline_id: ${resources.pipelines.<name>.id}`) use the flat resource key (like `consumer_bronze_pipeline`) rather than physical directory paths (like `consumer.consumer_bronze_pipeline`).
+7. **Dynamic Parent Table Schema Reference**: When query joining parent tables for referential expectations, do NOT hardcode schema names like `consumer_bronze` or `consumer_order_bronze`. Always dynamically query from `f"{catalog}.{bronze_schema}.{ref_entity}_mv"` where `bronze_schema` is resolved from `target_schema` by replacing `_silver` with `_bronze`.
+8. **Lakeflow Schema DDL Projection to Prevent Schema Pollution**: When joining a parent table to evaluate expectations (which adds columns like `parent_consumer_id`), you must declare an explicit DDL schema string inside the `@dp.materialized_view(schema="...")` decorator parameter listing only target columns. Lakeflow will automatically project the returned DataFrame to match the DDL schema, dropping any extra helper/validation columns from the final table output.
+9. **Spark SQL Imports Verification**: Ensure that all PySpark functions used in transformation scripts (such as `col`, `trim`, `to_date`, `when`, `current_timestamp`) are explicitly imported from `pyspark.sql.functions` to prevent NameErrors at runtime.
+10. **Jupyter Notebook JSON Escaping**: When writing or generating `.ipynb` files, ensure string quote escaping uses standard single-escaped `\"` instead of double-escaped `\\\"` in SQL/Python statements.
+11. **Production Mode for Multi-Schema Target Deployments**: For target environments (such as `dev`) where Lakeflow pipelines publish to separate, distinct schemas (e.g. `dev_bronze` and `dev_silver`) and reference tables across them, ensure that `mode: production` is used instead of `mode: development`. In development mode, the CLI automatically overrides all pipeline target databases to a single developer-specific schema (like `dev`), which blocks cross-pipeline compilation and causes naming collisions when tables share the same base name across layers.
+
+
+
 

@@ -1,0 +1,85 @@
+{
+  "$schema": "./metadata_schema.json",
+  "schema_version": "2.0",
+  "entity": {
+    "name": "distributor",
+    "domain": "cpg",
+    "description": "Distributor profiles processed through landing, bronze, and silver Lakeflow layers.",
+    "source_system": "cpg_seed_data",
+    "business_grain": "one record per distributor_id",
+    "primary_keys": [ "distributor_id" ]
+  },
+  "job": {
+    "name_template": "{entity_name}_workflow",
+    "trigger": {
+      "type": "file_arrival",
+      "settings": {
+        "path_template": "/Volumes/{catalog}/{pipeline_schema}/{volume}/{entity_name}/"
+      }
+    },
+    "pipeline_flow": [
+      { "pipeline": "bronze", "depends_on": [] },
+      { "pipeline": "silver", "depends_on": [ "bronze" ] }
+    ]
+  },
+  "source": {
+    "format": "json",
+    "reader_options": {
+      "multiLine": true
+    },
+    "schema": [
+      { "name": "distributor_id", "type": "integer", "nullable": false, "primary_key": true },
+      { "name": "distributor_name", "type": "string", "nullable": true },
+      { "name": "phone_number", "type": "string", "nullable": true },
+      { "name": "street_address", "type": "string", "nullable": true },
+      { "name": "postal_code", "type": "string", "nullable": true },
+      { "name": "city", "type": "string", "nullable": true },
+      { "name": "state", "type": "string", "nullable": true },
+      { "name": "country", "type": "string", "nullable": true },
+      { "name": "operation", "type": "string", "nullable": false }
+    ]
+  },
+  "processing_rules": {
+    "cdc": {
+      "enabled": true,
+      "type": "scd2",
+      "keys": [ "distributor_id" ],
+      "sequence_by": "ingestion_time",
+      "operation_column": "operation",
+      "delete_value": "delete"
+    },
+    "layers": {
+      "landing": {
+        "generated_columns": [
+          { "name": "ingestion_time", "type": "timestamp", "expression": "current_timestamp()" }
+        ]
+      },
+      "bronze": {
+        "source_table": "{entity_name}_cdc_stream",
+        "target_view": "{entity_name}_mv",
+        "quality": "bronze",
+        "filters": [ "__START_AT IS NOT NULL AND __END_AT IS NULL" ],
+        "drop_columns": [ "operation", "ingestion_time", "__START_AT", "__END_AT", "__OPERATION" ]
+      },
+      "silver": {
+        "source_view": "{entity_name}_mv",
+        "target_view": "{entity_name}_mv",
+        "quality": "silver",
+        "expectations": [
+          { "name": "valid_distributor_id", "expression": "distributor_id IS NOT NULL", "action": "drop" }
+        ],
+        "transformations": [
+          { "rule": "trim", "columns": [ "distributor_name", "phone_number", "street_address", "postal_code", "city", "state", "country" ] }
+        ]
+      }
+    }
+  },
+  "runtime_config": {
+    "required_keys": [
+      { "name": "catalog", "type": "string", "required": true },
+      { "name": "pipeline_schema", "type": "string", "required": true },
+      { "name": "volume", "type": "string", "required": true },
+      { "name": "target_schema", "type": "string", "required": true }
+    ]
+  }
+}

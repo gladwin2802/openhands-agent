@@ -1,0 +1,42 @@
+[
+  {
+    "title": "Check existence of all required files and directories",
+    "notes": "All 6 core files and directories present",
+    "status": "done"
+  },
+  {
+    "title": "Verify bundle variables completeness and references",
+    "notes": "All used ${var.*} declared: catalog, pipeline_schema, volume",
+    "status": "done"
+  },
+  {
+    "title": "Validate inclusion patterns are recursive",
+    "notes": "resources/**/*.yml matches recursively",
+    "status": "done"
+  },
+  {
+    "title": "Audit silver.py schema replacement logic",
+    "notes": "replace('_silver','_bronze') yields distributor_bronze, matches bronze target",
+    "status": "done"
+  },
+  {
+    "title": "Check for module-level SQL execution violations",
+    "notes": "No spark.sql DDL at module level in any python file",
+    "status": "done"
+  },
+  {
+    "title": "Verify resource key flattening correctness",
+    "notes": "Flat keys like distributor_bronze_pipeline used, not nested paths",
+    "status": "done"
+  },
+  {
+    "title": "Review dependency mapping accuracy",
+    "notes": "Job config dependencies match metadata and project_metadata",
+    "status": "done"
+  },
+  {
+    "title": "Fix any discovered issues",
+    "notes": "No issues found",
+    "status": "done"
+  }
+]

@@ -41,7 +41,7 @@ def format_column_schema(col) -> str:
     else:
         return f"{col_name} ({col_type})"
 
-def dynamically_update_setup_ipynb(meta, entity_name, workspace_path_str=None):
+def dynamically_update_setup_ipynb(meta, entity_name, workspace_path=None):
     # Determine the relative landing path from trigger settings
     rel_path = entity_name
     job = meta.get("job", {})
@@ -57,11 +57,8 @@ def dynamically_update_setup_ipynb(meta, entity_name, workspace_path_str=None):
     display_name = " ".join(word.capitalize() for word in entity_name.split("_"))
     
     # Resolve target project dynamically from environment or last run state
-    if workspace_path_str:
-        workspace = Path(workspace_path_str)
-    else:
-        workspace = Path(__file__).resolve().parent.parent
-    last_project_file = workspace / ".last_project"
+    backend_dir = Path(__file__).resolve().parent.parent
+    last_project_file = backend_dir / ".last_project"
     default_project = "demo"
     if last_project_file.exists():
         try:
@@ -71,7 +68,8 @@ def dynamically_update_setup_ipynb(meta, entity_name, workspace_path_str=None):
     import os
     target_project_name = os.environ.get("TARGET_PROJECT", default_project)
     
-    setup_path = workspace / target_project_name / "src" / "bootstrap" / "setup.ipynb"
+    project_root = Path(workspace_path) if workspace_path is not None else backend_dir
+    setup_path = project_root / target_project_name / "src" / "bootstrap" / "setup.ipynb"
     if not setup_path.exists():
         print(f"Warning: setup.ipynb not found at {setup_path}")
         return
@@ -102,9 +100,10 @@ def dynamically_update_setup_ipynb(meta, entity_name, workspace_path_str=None):
                         if len(parts) == 2:
                             k = parts[0].strip().strip('"').strip("'")
                             v = parts[1].strip().strip('"').strip("'")
-                            existing_entries[k] = v
+                            existing_entries[k.lower()] = v.lower().rstrip("/")
                             
-                if display_name not in existing_entries:
+                # Check display name and target path case-insensitively
+                if display_name.lower() not in existing_entries and rel_path.lower().rstrip("/") not in existing_entries.values():
                     # Insert new entry before the closing brace line
                     prev_idx = end_idx - 1
                     if prev_idx > start_idx:
@@ -126,7 +125,7 @@ def dynamically_update_setup_ipynb(meta, entity_name, workspace_path_str=None):
             f.write("\n")
         print(f"Dynamically added '{display_name}': '{rel_path}' to setup.ipynb")
 
-def generate_task_file(metadata_path: Path, output_path: Path, workspace_path_str: str = None):
+def generate_task_file(metadata_path: Path, output_path: Path, workspace_path: Path = None):
     with open(metadata_path, 'r', encoding='utf-8') as f:
         meta = json.load(f)
         
@@ -146,9 +145,8 @@ def generate_task_file(metadata_path: Path, output_path: Path, workspace_path_st
     relationships = meta.get('relationships', [])
     
     lines = []
-    base_path_val = workspace_path_str if workspace_path_str else "the designated workspace folder"
-    lines.append(f"IMPORTANT: Strictly in this BASE_PATH={base_path_val}")
     lines.append("The terminal is Windows PowerShell 5.1. **CRITICAL**: Do NOT use `&&` or `||` to chain commands in terminal tool calls (PowerShell doesn't support them). Always run commands sequentially or use `;` as a separator.")
+    lines.append("IMPORTANT: Strictly in the current workspace path, pwd output")
     lines.append("")
     lines.append("Starting point:")
     lines.append("  - A metadata JSON file (e.g., metadata_consumer.json) exists in `instructions/metadata/` with a dynamic structure.")
@@ -173,10 +171,11 @@ def generate_task_file(metadata_path: Path, output_path: Path, workspace_path_st
     lines.append("  - This task is driven by the dynamic metadata file. All generated files should be derived from its contents.")
     lines.append("  - Use `task_tracker` to plan the work.")
     lines.append(f"  - The entity name to use is: '{entity_name}'.")
+    lines.append("  - **CRITICAL: File Editing/Creation:** Do NOT write or edit files using multi-line PowerShell commands (such as `Set-Content`, `Out-File`, `echo`, or redirection `>`). Multi-line input in the interactive terminal often hangs on newlines (triggering nested prompts `>>`). Always use the specialized `FileEditor` tool (or Python script file writes) to create or modify file content.")
     lines.append("")
     lines.append("Coding Standards:")
     lines.append("  - Use standard indentation (2 spaces for YAML, 4 for Python) and proper line breaks.")
-    lines.append("  - Use Delta Live Tables (DLT) syntax (`import dlt`, `@dlt.table`).")
+    lines.append("  - Use Lakeflow Declarative Pipelines (SDP) syntax (`from pyspark import pipelines as dp`).")
     lines.append("  - Use `spark.conf.get()` to retrieve pipeline configuration values.")
     lines.append("")
     
@@ -184,10 +183,14 @@ def generate_task_file(metadata_path: Path, output_path: Path, workspace_path_st
     lines.append("**Turn 1: YAML Configuration (Bundle, Jobs, Pipelines)**")
     lines.append("")
     lines.append("1.  **databricks.yml**:")
-    lines.append("    - Create/update `demo/databricks.yml` to support inclusion patterns (use glob patterns `resources/**/*.yml` to search subdirectories recursively).")
+    lines.append("    - Create/update `demo/databricks.yml` to support inclusion patterns (always define the explicit list: `resources/*.yml`, `resources/*/*.yml`, and `resources/*/*/*.yml` recursively).")
     req_keys = [k['name'] for k in runtime_config['required_keys']]
-    lines.append(f"    - Define bundle variables: {', '.join(req_keys)}, plus `bronze_target_schema` and `silver_target_schema`.")
-    lines.append("      - WARNING: You MUST edit/create `demo/databricks.yml` and declare all of the requested variables and inclusion glob patterns.")
+    all_vars = list(req_keys) + ['bronze_target_schema', 'silver_target_schema', 'schema']
+    lines.append(f"    - Define bundle variables: {', '.join(all_vars)}.")
+    lines.append("      - WARNING: You MUST edit/create `demo/databricks.yml` and declare all of the requested variables with dynamic defaults (e.g., using `${bundle.target}` for `catalog` and `schema`, `landing` for `pipeline_schema`, `bronze` for `bronze_target_schema`, `silver` for `silver_target_schema`, `silver` for `target_schema`, and `data` for `volume`).")
+    lines.append("      - Ensure that under target definitions (such as `dev` and `prod`), you omit hardcoded target-specific variable overrides and instead let them resolve dynamically from the defaults.")
+    lines.append("      - Use dynamic workspace references (specifically `${workspace.current_user.userName}`) for settings like `root_path` and target permissions `user_name` to avoid hardcoding specific usernames or email addresses.")
+    lines.append("      - **CRITICAL**: For target environments (such as `dev`) that utilize multiple distinct target schemas (e.g., `dev_bronze` and `dev_silver`) with cross-pipeline references, you MUST specify `mode: production` instead of `mode: development` in the target configuration block. This prevents Databricks CLI from overriding all pipeline targets to a single schema (like `dev`), which breaks cross-pipeline references.")
     lines.append("Make sure finally the databricks.yml structure after edit is proper")
     
     lines.append("2.  **Job YAML**:")
@@ -197,7 +200,8 @@ def generate_task_file(metadata_path: Path, output_path: Path, workspace_path_st
     trigger_type = job['trigger']['type']
     if trigger_type == 'file_arrival':
         path_tmpl = job['trigger']['settings'].get('path_template', '/Volumes/{catalog}/{pipeline_schema}/{volume}/{entity_name}/')
-        path_filled = path_tmpl.replace('{entity_name}', entity_name)
+        # Translate placeholder brackets to dynamic DAB variable syntax
+        path_filled = path_tmpl.replace('{catalog}', '${var.catalog}').replace('{pipeline_schema}', '${var.pipeline_schema}').replace('{volume}', '${var.volume}').replace('{entity_name}', entity_name)
         lines.append(f"    - Configure job trigger with `pause_status: UNPAUSED` and `file_arrival` with url: `{path_filled}`.")
     elif trigger_type == 'schedule':
         cron = job['trigger']['settings']['cron_expression']
@@ -214,8 +218,11 @@ def generate_task_file(metadata_path: Path, output_path: Path, workspace_path_st
     lines.append("3.  **Pipeline YAMLs**:")
     for item in job['pipeline_flow']:
         p_name = item['pipeline']
-        lines.append(f"    - Create serverless DLT pipeline configuration `demo/resources/pipelines/{entity_name}/{entity_name}_{p_name}_pipeline.yml`.")
-        lines.append(f"      - Target should be: `{entity_name}_{p_name}`.")
+        lines.append(f"    - Create Lakeflow pipeline configuration `demo/resources/pipelines/{entity_name}/{entity_name}_{p_name}_pipeline.yml`.")
+        if p_name == "bronze":
+            lines.append("      - Target should be: `${var.bronze_target_schema}`.")
+        else:
+            lines.append("      - Target should be: `${var.silver_target_schema}`.")
         lines.append(f"      - Catalog should be: `${{var.catalog}}`.")
         if p_name == "bronze":
             lines.append(f"      - Libraries should list these file paths under the `- file:` parameter (since they are raw python scripts, NOT notebooks, relative to the pipeline config folder):")
@@ -225,16 +232,19 @@ def generate_task_file(metadata_path: Path, output_path: Path, workspace_path_st
             lines.append(f"      - Libraries should list this file path under the `- file:` parameter (since it is a raw python script, NOT a notebook, relative to the pipeline config folder):")
             lines.append(f"        - `../../../src/{entity_name}/{entity_name}_{p_name}/transformations/{p_name}.py`")
         if p_name == "silver":
-            lines.append(f"      - Pass configuration variables: catalog, pipeline_schema, volume, and target_schema (which should be set to `{entity_name}_silver`). Do NOT pass `bronze_schema`.")
+            lines.append("      - Pass configuration variables: catalog, pipeline_schema, volume, and target_schema (which should be set to `${var.silver_target_schema}`). Do NOT pass `bronze_schema`.")
         else:
-            lines.append(f"      - Pass configuration variables: catalog, pipeline_schema, volume, and target_schema (which should be set to `{entity_name}_bronze`).")
+            lines.append("      - Pass configuration variables: catalog, pipeline_schema, volume, and target_schema (which should be set to `${var.bronze_target_schema}`).")
     lines.append("")
     
     lines.append("4.  **Bootstrap / Orchestration Setup (Bootstrap Part)**:")
-    lines.append("    - Update/Create `instructions/metadata/project_metadata.json`:")
-    lines.append("      - If the file is missing, initialize it with a basic skeleton containing `schema_version`, `project_name`, `global_config` and `bootstrap` object (having `job_name`, `setup_notebook_path`, `entities` list, and `dependency_graph` containing the `setup` notebook task).")
-    lines.append(f"      - Add the entity details (name, folder path, and job resource key `{entity_name}_workflow`) to the `bootstrap.entities` array.")
-    lines.append(f"      - Add a corresponding orchestration task `run_{entity_name}_job` of type `run_job_task` referencing `{entity_name}_workflow` job to the `bootstrap.dependency_graph` under the correct dependency sequence.")
+    lines.append("    - **Overwrite/Create** `instructions/metadata/project_metadata.json`:")
+    lines.append(f"      - Clear and overwrite this file completely on every run so that it only represents the current target project (`PROJECT_NAME`) and the last/active entity run.")
+    lines.append(f"      - The file should only contain a basic skeleton with `schema_version`, `project_name` (`PROJECT_NAME`), `global_config`, and the current entity details (name, folder path, and job resource key `{entity_name}_workflow`) in the `bootstrap.entities` array, plus the setup task and the single active task `run_{entity_name}_job` in `bootstrap.dependency_graph`.")
+    lines.append("    - **Update/Create** `demo/PROJECT_NAME_metadata.json`:")
+    lines.append("      - If this file is missing in the target project root, initialize it with a basic skeleton containing `schema_version`, `project_name` (`PROJECT_NAME`), `global_config` and `bootstrap` object (having `job_name`, `setup_notebook_path`, `entities` list, and `dependency_graph` containing the `setup` notebook task).")
+    lines.append(f"      - Add/append the entity details (name, folder path, and job resource key `{entity_name}_workflow`) to the `bootstrap.entities` array (preserving existing entries).")
+    lines.append(f"      - Add/append the corresponding orchestration task `run_{entity_name}_job` of type `run_job_task` referencing the `{entity_name}_workflow` job to the `bootstrap.dependency_graph` under the correct dependency sequence (preserving existing tasks, making this new task run sequentially after the previous entity's task).")
     lines.append("    - `demo/src/bootstrap/setup.ipynb`:")
     lines.append("      - If this file is missing, create it using the base JSON notebook template defined in knowledge.")
     lines.append("      - (Note: The task generator has already dynamically registered this entity, but if the notebook is recreated from scratch, ensure the `input_file_paths` dictionary includes this entity's mapping.)")
@@ -248,7 +258,8 @@ def generate_task_file(metadata_path: Path, output_path: Path, workspace_path_st
     lines.append("")
     lines.append("1.  **landing.py** (in the bronze pipeline transformations folder):")
     lines.append("    - **CRITICAL**: Construct the landing path dynamically by reading configuration values `catalog`, `pipeline_schema`, and `volume` from Spark conf (via `spark.conf.get()`). Do NOT hardcode or use fallback literals containing bundle-style variables like `\"/Volumes/${var.catalog}...\"` in Python code.")
-    lines.append("    - Read stream in format `cloudFiles` from landing path.")
+    lines.append("    - Create raw stream as a streaming table. First define the table using `dp.create_streaming_table(\"{entity_name}_raw_stream\")`, then decorate the loading function with `@dp.append_flow(target=\"{entity_name}_raw_stream\")`.")
+    lines.append("    - Inside the decorated function, read stream in format `cloudFiles` from the landing path.")
     lines.append(f"    - Configure Auto Loader option `cloudFiles.format` as `{source['format']}`.")
     if source.get('reader_options'):
         opts = [f"{k}={v}" for k, v in source['reader_options'].items()]
@@ -268,8 +279,8 @@ def generate_task_file(metadata_path: Path, output_path: Path, workspace_path_st
         lines.append(f"      - Keys: {', '.join(cdc['keys'])}")
         lines.append(f"      - Sequence by: `{cdc['sequence_by']}`")
         if cdc.get('operation_column'):
-            lines.append(f"      - Operation column: `{cdc['operation_column']}` (deletes when value is '{cdc.get('delete_value', 'delete')}', specified using a Column expression like `col(\"{cdc['operation_column']}\") == \"{cdc.get('delete_value', 'delete')}\"`)")
-        lines.append(f"      - **CRITICAL**: Do NOT decorate the function executing `dlt.apply_changes` with `@dlt.table` and return its output. Instead, create the streaming table first via `dlt.create_streaming_table(\"{entity_name}_cdc_stream\")`, read the raw stream inside a separate `@dlt.view` function, and execute `dlt.apply_changes` at the module level (outside any decorated function).")
+            lines.append(f"      - Operation column: `{cdc['operation_column']}` (deletes when value is '{cdc.get('delete_value', 'delete')}', specified using an expression like `expr(\"operation = '{cdc.get('delete_value', 'delete')}'\")` or similar target condition)")
+        lines.append(f"      - **CRITICAL**: Use Lakeflow SDP syntax. Create a target streaming table via `dp.create_streaming_table(\"{entity_name}_cdc_stream\")` and define the CDC flow at the module level using `dp.create_auto_cdc_flow(source=\"{entity_name}_raw_stream\", target=\"{entity_name}_cdc_stream\", name=\"cdc_{entity_name}_flow\", keys=..., sequence_by=..., apply_as_deletes=..., stored_as_scd_type=\"2\")`.")
     lines.append("")
     
     lines.append("2.  **bronze.py** (in the bronze pipeline transformations folder):")
@@ -277,7 +288,8 @@ def generate_task_file(metadata_path: Path, output_path: Path, workspace_path_st
         b_layer = layers['bronze']
         src_tbl = b_layer['source_table'].format(entity_name=entity_name)
         tgt_view = b_layer['target_view'].format(entity_name=entity_name)
-        lines.append(f"    - Create materialized view `{tgt_view}` reading from `{src_tbl}` using `dlt.read(\"{src_tbl}\")` (do NOT use legacy `spark.read.table(\"LIVE.{src_tbl}\")`).")
+        lines.append("    - Retrieve `catalog_config` and `schema_config` dynamically from Spark configuration.")
+        lines.append(f"    - Create materialized view `{tgt_view}` using `@dp.materialized_view(name=f\"{{catalog_config}}.{{schema_config}}.{tgt_view}\")` reading from `{src_tbl}` using `spark.read.table(\"{src_tbl}\")`.")
         if b_layer.get('filters'):
             lines.append(f"    - Apply filters: {', '.join(b_layer['filters'])}.")
         if b_layer.get('drop_columns'):
@@ -289,13 +301,13 @@ def generate_task_file(metadata_path: Path, output_path: Path, workspace_path_st
         s_layer = layers['silver']
         src_vw = s_layer['source_view'].format(entity_name=entity_name)
         tgt_vw = s_layer['target_view'].format(entity_name=entity_name)
-        lines.append(f"    - Create materialized view `{tgt_vw}` reading from the external bronze table `{src_vw}` using `spark.read.table(f\"{{catalog}}.{{bronze_schema}}.{src_vw}\")` where `catalog` and `target_schema` are retrieved from Spark conf (retrieved via `SparkSession.getActiveSession().conf.get(...)`), and `bronze_schema` is resolved dynamically in Python by replacing `_silver` with `_bronze` in `target_schema`.")
+        lines.append(f"    - Create materialized view `{tgt_vw}` reading from the external bronze table `{src_vw}` using `spark.read.table(f\"{{catalog}}.{{bronze_schema}}.{src_vw}\")` where `catalog` and `target_schema` are retrieved from Spark conf (retrieved via `SparkSession.getActiveSession().conf.get(...)`), and `bronze_schema` is resolved dynamically in Python by replacing `silver` with `bronze` in `target_schema`.")
         lines.append(f"      - **CRITICAL**: Retrieve the catalog name from Spark configuration using the flat key `\"catalog\"` (via `spark.conf.get(\"catalog\", \"main\")`). Do NOT check keys like `\"target.catalog\"` or `\"bundle.catalog\"` as they are not defined in the configuration block.")
         lines.append("      - **CRITICAL**: Ensure SparkSession is imported correctly: `from pyspark.sql import SparkSession`. Do NOT import it from `pyspark.sql.functions`.")
         
         exps = [f"{e['name']} ({e['expression']} -> action: {e['action']})" for e in s_layer.get('expectations', [])]
         if exps:
-            lines.append(f"    - Apply DLT data quality expectations: {', '.join(exps)}.")
+            lines.append(f"    - Apply data quality expectations: {', '.join(exps)} stacked directly on the materialized view definition function (e.g. `@dp.expect(...)`).")
             
         trans = s_layer.get('transformations', [])
         if trans:
@@ -320,8 +332,8 @@ def generate_task_file(metadata_path: Path, output_path: Path, workspace_path_st
         # Primary Key Constraints
         if pks:
             lines.append(f"    - Declare informational primary key constraints on `{tgt_vw}` (Primary Key: {', '.join(pks)}):")
-            lines.append("      - **CRITICAL**: Do NOT execute raw `spark.sql(\"ALTER TABLE ...\")` statements at the module level in your transformation Python files. This runs during import/compilation time and causes DLT validation to fail.")
-            lines.append("      - Instead, specify the informational primary key constraint inside the `@dlt.table(schema=\"...\")` decorator parameter using a DDL schema string containing columns and types with `NOT NULL PRIMARY KEY` specified on key column(s).")
+            lines.append("      - **CRITICAL**: Do NOT execute raw `spark.sql(\"ALTER TABLE ...\")` statements at the module level in your transformation Python files. This runs during import/compilation time and causes validation to fail.")
+            lines.append("      - Instead, specify the informational primary key constraint inside the `@dp.materialized_view(schema=\"...\")` decorator parameter using a DDL schema string containing columns and types with `NOT NULL PRIMARY KEY` specified on key column(s).")
             
         # Relationships & Referential Integrity
         if relationships:
@@ -332,10 +344,11 @@ def generate_task_file(metadata_path: Path, output_path: Path, workspace_path_st
                 ref_cols = ", ".join(rel['referenced_keys'])
                 lines.append(f"      - Validate relationship `{rel['name']}`: local keys `{local_cols}` must reference `{ref_ent}` keys `{ref_cols}`.")
                 lines.append(f"        - Implementation Steps to prevent schema pollution and column name collisions:")
-                lines.append(f"          1. Load the parent table `{ref_ent}_mv` using `spark.read.table(f\"{{catalog}}.{ref_ent}_bronze.{ref_ent}_mv\")`.")
+                lines.append(f"          1. Load the parent table `{ref_ent}_mv` using `spark.read.table(f\"{{catalog}}.{{bronze_schema}}.{ref_ent}_mv\")` where `bronze_schema` is resolved by replacing `silver` with `bronze` in the current `target_schema`.")
                 lines.append(f"          2. Select only key column(s) from the parent table, renaming them to avoid name collisions (e.g. rename `{ref_cols}` to `parent_{ref_cols}`).")
                 lines.append(f"          3. Perform a left join of the child table with the parent key subset on the matching keys (e.g. `df.join(parent_df, df[\"{local_cols}\"] == parent_df[\"parent_{ref_cols}\"], \"left\")`).")
-                lines.append(f"          4. Apply the DLT expectation `@dlt.expect_or_drop(\"valid_{rel['name']}\", \"parent_{ref_cols} IS NOT NULL\")`. Note that this validation column must remain in the returned DataFrame so that DLT can evaluate the expectation against the schema.")
+                lines.append(f"          4. Apply the expect or drop decorator (e.g., `@dp.expect_or_drop(\"valid_{rel['name']}\", \"parent_{ref_cols} IS NOT NULL\")`) stacked on the materialized view function.")
+                lines.append(f"          5. **CRITICAL**: To prevent schema pollution and avoid writing the helper validation column `parent_{ref_cols}` to the target database table, you MUST declare an explicit DDL schema string inside the `@dp.materialized_view(schema=\"...\")` decorator parameter listing only target silver columns. Lakeflow will automatically project and drop any extra helper validation columns from the written output.")
     lines.append("")
     
     # Turn 3
@@ -345,16 +358,20 @@ def generate_task_file(metadata_path: Path, output_path: Path, workspace_path_st
     lines.append("2. Verify that the files match all configuration values in the metadata file.")
     lines.append("3. Perform a thorough audit of the code and configuration for logical errors. Specifically verify:")
     lines.append("   - All referenced bundle variables (like `${var.volume}`) are defined under the `variables` section in `demo/databricks.yml`.")
-    lines.append("   - The inclusion pattern in `demo/databricks.yml` is recursive (e.g. `resources/pipelines/**/*.yml`).")
+    lines.append("   - All variables overridden or assigned under target `variables` blocks (such as `schema`) are declared in the top-level `variables` section of `demo/databricks.yml`.")
+    lines.append("   - The inclusion pattern in `demo/databricks.yml` is defined as the explicit three-tier pattern list.")
     lines.append("   - `silver.py` replacement mapping logic works dynamically. For instance, if `target_schema` is set to `distributor_silver`, replacing `_silver` with `_bronze` correctly resolves to `distributor_bronze` (which matches the bronze pipeline's target schema).")
     lines.append("   - There are **no** module-level `spark.sql` statements executing DDL commands.")
+    lines.append("   - All PySpark SQL functions referenced in transformation scripts (such as `col`, `trim`, `to_date`, `when`) are explicitly imported from `pyspark.sql.functions`.")
+    lines.append("   - Setup Notebook (`setup.ipynb`) contains standard escaping `f\"` instead of double-escaped `f\\\"` in SQL statements.")
+    lines.append("   - Target settings (such as `dev`) use `mode: production` instead of `mode: development` when separate target schemas are used to prevent Databricks from force-overriding DLT targets to a single schema.")
     lines.append("4. Proactively correct any logical errors, syntax issues, or target-schema discrepancies found during verification.")
     
     # Dynamically update setup.ipynb
-    dynamically_update_setup_ipynb(meta, entity_name, workspace_path_str)
+    dynamically_update_setup_ipynb(meta, entity_name, workspace_path)
     
     target_project = os.environ.get("TARGET_PROJECT", "demo")
-    final_text = "\n".join(lines).replace("demo/", f"{target_project}/")
+    final_text = "\n".join(lines).replace("demo/", f"{target_project}/").replace("PROJECT_NAME", target_project)
     
     with open(output_path, 'w', encoding='utf-8') as f_out:
         f_out.write(final_text)
@@ -369,5 +386,4 @@ if __name__ == "__main__":
         meta_path = Path(sys.argv[1])
     if len(sys.argv) > 2:
         out_path = Path(sys.argv[2])
-    ws = sys.argv[3] if len(sys.argv) > 3 else None
-    generate_task_file(meta_path, out_path, ws)
+    generate_task_file(meta_path, out_path)

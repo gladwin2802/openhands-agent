@@ -114,12 +114,17 @@ async def run_openhands_agent(session_id: str, prompt: str, workspace_path: str,
         llm_api_key = os.getenv("LLM_API_KEY")
         llm_base_url = os.getenv("LLM_BASE_URL")
 
+        max_tokens = None
+        # max_tokens = 8192 if "minimax" in llm_model else None
+
         llm = LLM(
             model=llm_model,
             api_key=llm_api_key,
             base_url=llm_base_url,
+            max_output_tokens=max_tokens,
             stream=True,
-            litellm_extra_body={"parallel_tool_calls": True},
+            # native_tool_calling=False,
+            # litellm_extra_body={"parallel_tool_calls": True},
         )
 
         agent = Agent(
@@ -128,7 +133,7 @@ async def run_openhands_agent(session_id: str, prompt: str, workspace_path: str,
                 Tool(name=TerminalTool.name),
                 Tool(name=FileEditorTool.name),
                 Tool(name=TaskTrackerTool.name),
-            ],
+            ]        
         )
 
         orig_step = agent.step

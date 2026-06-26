@@ -1,0 +1,114 @@
+IMPORTANT: Strictly in this BASE_PATH=C:\Users\Gladwin.aj\Downloads\workspace
+The terminal is Windows PowerShell 5.1. **CRITICAL**: Do NOT use `&&` or `||` to chain commands in terminal tool calls (PowerShell doesn't support them). Always run commands sequentially or use `;` as a separator.
+
+Starting point:
+  - A metadata JSON file (e.g., metadata_consumer.json) exists in `instructions/metadata/` with a dynamic structure.
+  - The `demo/` project exists and will be populated based on the metadata configuration.
+
+Entity: distributor (Distributor profiles processed through landing, bronze, and silver Lakeflow layers.)
+
+Folder structure to be created under demo/:
+  demo/
+    databricks.yml
+    resources/
+      jobs/
+      pipelines/distributor/
+    src/
+      distributor/
+        distributor_bronze/
+          transformations/
+        distributor_silver/
+          transformations/
+
+General Instructions:
+  - This task is driven by the dynamic metadata file. All generated files should be derived from its contents.
+  - Use `task_tracker` to plan the work.
+  - The entity name to use is: 'distributor'.
+
+Coding Standards:
+  - Use standard indentation (2 spaces for YAML, 4 for Python) and proper line breaks.
+  - Use Delta Live Tables (DLT) syntax (`import dlt`, `@dlt.table`).
+  - Use `spark.conf.get()` to retrieve pipeline configuration values.
+
+**Turn 1: YAML Configuration (Bundle, Jobs, Pipelines)**
+
+1.  **databricks.yml**:
+    - Create/update `demo/databricks.yml` to support inclusion patterns (use glob patterns `resources/**/*.yml` to search subdirectories recursively).
+    - Define bundle variables: catalog, pipeline_schema, volume, target_schema, plus `bronze_target_schema` and `silver_target_schema`.
+      - WARNING: You MUST edit/create `demo/databricks.yml` and declare all of the requested variables and inclusion glob patterns.
+Make sure finally the databricks.yml structure after edit is proper
+2.  **Job YAML**:
+    - Create `demo/resources/jobs/distributor_job.yml` named: `distributor_workflow`.
+    - Configure job trigger with `pause_status: UNPAUSED` and `file_arrival` with url: `/Volumes/{catalog}/{pipeline_schema}/{volume}/distributor/`.
+    - Set up tasks: bronze, silver with dependencies matching the flow in metadata.
+      - **CRITICAL**: When referencing pipeline IDs (e.g. `pipeline_id`), reference the flat resource key directly. Do NOT include the folder path or entity namespace inside the key (e.g., use `${resources.pipelines.distributor_bronze_pipeline.id}` instead of `${resources.pipelines.distributor.distributor_bronze_pipeline.id}`).
+
+3.  **Pipeline YAMLs**:
+    - Create serverless DLT pipeline configuration `demo/resources/pipelines/distributor/distributor_bronze_pipeline.yml`.
+      - Target should be: `distributor_bronze`.
+      - Catalog should be: `${var.catalog}`.
+      - Libraries should list these file paths under the `- file:` parameter (since they are raw python scripts, NOT notebooks, relative to the pipeline config folder):
+        - `../../../src/distributor/distributor_bronze/transformations/landing.py`
+        - `../../../src/distributor/distributor_bronze/transformations/bronze.py`
+      - Pass configuration variables: catalog, pipeline_schema, volume, and target_schema (which should be set to `distributor_bronze`).
+    - Create serverless DLT pipeline configuration `demo/resources/pipelines/distributor/distributor_silver_pipeline.yml`.
+      - Target should be: `distributor_silver`.
+      - Catalog should be: `${var.catalog}`.
+      - Libraries should list this file path under the `- file:` parameter (since it is a raw python script, NOT a notebook, relative to the pipeline config folder):
+        - `../../../src/distributor/distributor_silver/transformations/silver.py`
+      - Pass configuration variables: catalog, pipeline_schema, volume, and target_schema (which should be set to `distributor_silver`). Do NOT pass `bronze_schema`.
+
+4.  **Bootstrap / Orchestration Setup (Bootstrap Part)**:
+    - Update/Create `instructions/metadata/project_metadata.json`:
+      - If the file is missing, initialize it with a basic skeleton containing `schema_version`, `project_name`, `global_config` and `bootstrap` object (having `job_name`, `setup_notebook_path`, `entities` list, and `dependency_graph` containing the `setup` notebook task).
+      - Add the entity details (name, folder path, and job resource key `distributor_workflow`) to the `bootstrap.entities` array.
+      - Add a corresponding orchestration task `run_distributor_job` of type `run_job_task` referencing `distributor_workflow` job to the `bootstrap.dependency_graph` under the correct dependency sequence.
+    - `demo/src/bootstrap/setup.ipynb`:
+      - If this file is missing, create it using the base JSON notebook template defined in knowledge.
+      - (Note: The task generator has already dynamically registered this entity, but if the notebook is recreated from scratch, ensure the `input_file_paths` dictionary includes this entity's mapping.)
+    - Update/Create `demo/resources/jobs/bootstrap_job.yml`:
+      - If this file is missing, create it using the base YAML template defined in knowledge.
+      - Add a task to run the entity's workflow job (`run_distributor_job`) using `run_job_task` type and specify its execution dependencies (it should depend sequentially on the last entity task in the bootstrap workflow to run all entity workflows serially, rather than in parallel).
+
+**Turn 2: Transformation Code Implementation**
+
+1.  **landing.py** (in the bronze pipeline transformations folder):
+    - **CRITICAL**: Construct the landing path dynamically by reading configuration values `catalog`, `pipeline_schema`, and `volume` from Spark conf (via `spark.conf.get()`). Do NOT hardcode or use fallback literals containing bundle-style variables like `"/Volumes/${var.catalog}..."` in Python code.
+    - Read stream in format `cloudFiles` from landing path.
+    - Configure Auto Loader option `cloudFiles.format` as `json`.
+    - Configure reader options: multiLine=True.
+    - Define explicit PySpark schema: distributor_id (integer), distributor_name (string), phone_number (string), street_address (string), postal_code (string), city (string), state (string), country (string), operation (string).
+    - Generate column `ingestion_time` (timestamp) using expression `current_timestamp()`.
+    - Apply CDC changes targeting streaming table `distributor_cdc_stream`:
+      - CDC Type: `scd2`
+      - Keys: distributor_id
+      - Sequence by: `ingestion_time`
+      - Operation column: `operation` (deletes when value is 'delete', specified using a Column expression like `col("operation") == "delete"`)
+      - **CRITICAL**: Do NOT decorate the function executing `dlt.apply_changes` with `@dlt.table` and return its output. Instead, create the streaming table first via `dlt.create_streaming_table("distributor_cdc_stream")`, read the raw stream inside a separate `@dlt.view` function, and execute `dlt.apply_changes` at the module level (outside any decorated function).
+
+2.  **bronze.py** (in the bronze pipeline transformations folder):
+    - Create materialized view `distributor_mv` reading from `distributor_cdc_stream` using `dlt.read("distributor_cdc_stream")` (do NOT use legacy `spark.read.table("LIVE.distributor_cdc_stream")`).
+    - Apply filters: __START_AT IS NOT NULL AND __END_AT IS NULL.
+    - Drop columns: operation, ingestion_time, __START_AT, __END_AT, __OPERATION.
+
+3.  **silver.py** (in the silver pipeline transformations folder):
+    - Create materialized view `distributor_mv` reading from the external bronze table `distributor_mv` using `spark.read.table(f"{catalog}.{bronze_schema}.distributor_mv")` where `catalog` and `target_schema` are retrieved from Spark conf (retrieved via `SparkSession.getActiveSession().conf.get(...)`), and `bronze_schema` is resolved dynamically in Python by replacing `_silver` with `_bronze` in `target_schema`.
+      - **CRITICAL**: Retrieve the catalog name from Spark configuration using the flat key `"catalog"` (via `spark.conf.get("catalog", "main")`). Do NOT check keys like `"target.catalog"` or `"bundle.catalog"` as they are not defined in the configuration block.
+      - **CRITICAL**: Ensure SparkSession is imported correctly: `from pyspark.sql import SparkSession`. Do NOT import it from `pyspark.sql.functions`.
+    - Apply DLT data quality expectations: valid_distributor_id (distributor_id IS NOT NULL -> action: drop).
+    - Apply column transformations:
+      - Rule `trim` on columns: distributor_name, phone_number, street_address, postal_code, city, state, country.
+    - Declare informational primary key constraints on `distributor_mv` (Primary Key: distributor_id):
+      - **CRITICAL**: Do NOT execute raw `spark.sql("ALTER TABLE ...")` statements at the module level in your transformation Python files. This runs during import/compilation time and causes DLT validation to fail.
+      - Instead, specify the informational primary key constraint inside the `@dlt.table(schema="...")` decorator parameter using a DDL schema string containing columns and types with `NOT NULL PRIMARY KEY` specified on key column(s).
+
+**Turn 3: Final Verification & Logical Correctness Audit**
+
+1. Confirm that all target pipeline YAML configs and source Python files exist under `demo/` folder structure.
+2. Verify that the files match all configuration values in the metadata file.
+3. Perform a thorough audit of the code and configuration for logical errors. Specifically verify:
+   - All referenced bundle variables (like `${var.volume}`) are defined under the `variables` section in `demo/databricks.yml`.
+   - The inclusion pattern in `demo/databricks.yml` is recursive (e.g. `resources/pipelines/**/*.yml`).
+   - `silver.py` replacement mapping logic works dynamically. For instance, if `target_schema` is set to `distributor_silver`, replacing `_silver` with `_bronze` correctly resolves to `distributor_bronze` (which matches the bronze pipeline's target schema).
+   - There are **no** module-level `spark.sql` statements executing DDL commands.
+4. Proactively correct any logical errors, syntax issues, or target-schema discrepancies found during verification.

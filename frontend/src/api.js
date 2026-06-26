@@ -40,6 +40,14 @@ export async function deleteAllSessions() {
   return res.json();
 }
 
+export async function deleteSession(sessionId) {
+  const res = await fetch(`${API_BASE}/api/sessions/${sessionId}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error(`Failed to delete session: ${res.status}`);
+  return res.json();
+}
+
 export async function getSession(sessionId) {
   const res = await fetch(`${API_BASE}/api/sessions/${sessionId}`);
   if (!res.ok) throw new Error(`Failed to fetch session: ${res.status}`);
