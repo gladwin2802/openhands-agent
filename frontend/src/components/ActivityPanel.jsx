@@ -32,6 +32,9 @@ const renderSubEventContent = (event) => {
   if (event.event_type === 'activity') {
     return <span className="sub-event-item" style={{ color: 'var(--text-secondary)' }}>{payload.content || ''}</span>;
   }
+  if (event.event_type === 'tool_execution') {
+    return <span className="sub-event-item" style={{ color: 'var(--text-secondary)' }}>{payload.content || ''}</span>;
+  }
   if (event.event_type === 'task_update') {
     return <span className="sub-event-item" style={{ whiteSpace: 'pre-wrap', fontFamily: 'var(--font-mono)' }}>{payload.content || ''}</span>;
   }
@@ -46,6 +49,7 @@ const ActionSubGroup = ({ type, events }) => {
   else if (type === 'terminal') title = `Executed ${events.length} terminal action${events.length > 1 ? 's' : ''}`;
   else if (type === 'error') title = `Encountered ${events.length} error${events.length > 1 ? 's' : ''}`;
   else if (type === 'activity') title = `${events.length} Action${events.length > 1 ? 's' : ''}`;
+  else if (type === 'tool_execution') title = `${events.length} Background Step${events.length > 1 ? 's' : ''}`;
   else if (type === 'task_update') title = `Task list updated (${events.length} event${events.length > 1 ? 's' : ''})`;
   else title = `${events.length} ${type} event${events.length > 1 ? 's' : ''}`;
 
@@ -310,36 +314,10 @@ export default function ActivityPanel({ events, agentStatus, sessionId }) {
               </button>
             )}
           </div>
-          <div style={{ display: 'flex', background: 'var(--bg-tertiary)', borderRadius: 'var(--radius-sm)', padding: '2px', gap: '2px' }}>
-            <button 
-              onClick={() => setActiveTab('activity')}
-              style={{
-                background: activeTab === 'activity' ? 'var(--bg-secondary)' : 'transparent',
-                color: activeTab === 'activity' ? 'var(--text-primary)' : 'var(--text-muted)',
-                boxShadow: activeTab === 'activity' ? 'var(--shadow-sm)' : 'none',
-                border: 'none', padding: '4px 12px', fontSize: '0.75rem', fontWeight: 600,
-                textTransform: 'uppercase', letterSpacing: '0.05em', borderRadius: 'var(--radius-sm)', cursor: 'pointer'
-              }}
-            >
-              Feed
-            </button>
-            <button 
-              onClick={() => setActiveTab('tasks')}
-              style={{
-                background: activeTab === 'tasks' ? 'var(--bg-secondary)' : 'transparent',
-                color: activeTab === 'tasks' ? 'var(--text-primary)' : 'var(--text-muted)',
-                boxShadow: activeTab === 'tasks' ? 'var(--shadow-sm)' : 'none',
-                border: 'none', padding: '4px 12px', fontSize: '0.75rem', fontWeight: 600,
-                textTransform: 'uppercase', letterSpacing: '0.05em', borderRadius: 'var(--radius-sm)', cursor: 'pointer'
-              }}
-            >
-              Tasks
-            </button>
-          </div>
+
         </div>
       </div>
       <div className="panel-content" style={{ padding: 'var(--space-md) 0', overflowY: 'auto' }}>
-        {activeTab === 'activity' ? (
           <>
             {displayItems.length === 0 ? (
               <div className="empty-state">
@@ -379,105 +357,15 @@ export default function ActivityPanel({ events, agentStatus, sessionId }) {
                 }
               })
             )}
-            
-            {displayItems.length > 0 && agentStatus === 'running' && (
+            {agentStatus === 'running' && (
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '12px', color: 'var(--text-muted)' }}>
                 <span className="spinner" style={{ width: '16px', height: '16px', opacity: 0.7 }} />
-                <span style={{ fontSize: '0.9rem', fontStyle: 'italic' }}>Agent is thinking...</span>
+                <span style={{ fontSize: '0.9rem', fontStyle: 'italic' }}>Agent is working...</span>
               </div>
             )}
             <div ref={bottomRef} />
           </>
-        ) : (
-          <div className="tasks-content" style={{ padding: '16px 24px', fontFamily: 'var(--font-sans)', color: 'var(--text-primary)' }}>
-            {taskSetsList.length === 0 ? (
-              <div style={{ color: 'var(--text-muted)' }}>No tasks created yet.</div>
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '48px' }}>
-                {taskSetsList.map((tasks, setIdx) => (
-                  <div key={setIdx} className="task-set-container">
-                    {taskSetsList.length > 1 && (
-                      <h3 style={{ 
-                        marginBottom: '24px', 
-                        color: 'var(--text-secondary)', 
-                        fontSize: '0.9rem', 
-                        textTransform: 'uppercase',
-                        letterSpacing: '0.05em',
-                        borderBottom: '1px solid var(--surface-border)', 
-                        paddingBottom: '8px' 
-                      }}>
-                        Task Set {setIdx + 1}
-                      </h3>
-                    )}
-                    <div style={{ display: 'flex', flexDirection: 'column' }}>
-                      {tasks.map((task, idx, arr) => {
-                        const isDone = task.icon.includes('✅') || task.icon.includes('x') || task.icon.includes('X');
-                        const isPending = task.icon.includes('⏳') || task.icon.includes('-');
-                        const isLast = idx === arr.length - 1;
-                        
-                        return (
-                          <div key={idx} style={{ display: 'flex', gap: '16px', position: 'relative', paddingBottom: isLast ? '0' : '24px' }}>
-                            {/* Vertical line connecting nodes */}
-                            {!isLast && (
-                              <div style={{
-                                position: 'absolute',
-                                top: '24px',
-                                bottom: '0',
-                                left: '11px',
-                                width: '2px',
-                                background: isDone ? 'var(--status-success)' : '#444',
-                                zIndex: 0
-                              }} />
-                            )}
-                            
-                            {/* Node Icon */}
-                            <div style={{
-                              width: '24px',
-                              height: '24px',
-                              borderRadius: '50%',
-                              background: isDone ? 'var(--status-success)' : isPending ? '#d97706' : '#444',
-                              display: 'flex',
-                              alignItems: 'center',
-                              justifyContent: 'center',
-                              zIndex: 1,
-                              border: '2px solid var(--bg-primary)',
-                              fontSize: '12px',
-                              color: '#fff',
-                              flexShrink: 0
-                            }}>
-                              {isDone ? '✓' : isPending ? '⏳' : ''}
-                            </div>
-                            
-                            {/* Content */}
-                            <div style={{ flex: 1, paddingTop: '2px' }}>
-                              <div style={{ fontWeight: 600, color: isDone ? 'var(--text-primary)' : 'var(--text-secondary)' }}>
-                                {task.id}. {task.title}
-                              </div>
-                              {task.notes && (
-                                <div style={{ 
-                                  marginTop: '8px', 
-                                  padding: '12px', 
-                                  background: 'var(--bg-tertiary)', 
-                                  borderRadius: '6px',
-                                  fontSize: '0.85rem',
-                                  color: 'var(--text-muted)',
-                                  whiteSpace: 'pre-wrap',
-                                  border: '1px solid #333'
-                                }}>
-                                  {task.notes}
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
+
       </div>
     </div>
   );

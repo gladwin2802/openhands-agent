@@ -65,6 +65,21 @@ async def init_db():
                 UNIQUE(session_id, file_path, snapshot_type)
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS metrics (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                turn_number INTEGER NOT NULL,
+                model_name TEXT,
+                prompt_tokens INTEGER,
+                completion_tokens INTEGER,
+                total_tokens INTEGER,
+                details_json TEXT,
+                run_duration REAL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(id)
+            )
+        """)
         await db.commit()
 
 
@@ -140,6 +155,7 @@ async def delete_all_sessions():
         await db.execute("DELETE FROM file_snapshots")
         await db.execute("DELETE FROM changed_files")
         await db.execute("DELETE FROM events")
+        await db.execute("DELETE FROM metrics")
         await db.execute("DELETE FROM sessions")
         await db.commit()
 
@@ -150,6 +166,7 @@ async def delete_session(session_id: str):
         await db.execute("DELETE FROM file_snapshots WHERE session_id = ?", (session_id,))
         await db.execute("DELETE FROM changed_files WHERE session_id = ?", (session_id,))
         await db.execute("DELETE FROM events WHERE session_id = ?", (session_id,))
+        await db.execute("DELETE FROM metrics WHERE session_id = ?", (session_id,))
         await db.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
         await db.commit()
 
@@ -256,5 +273,51 @@ async def get_all_snapshots(session_id: str) -> list:
             "SELECT * FROM file_snapshots WHERE session_id = ? ORDER BY file_path, snapshot_type",
             (session_id,),
         )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+# --------------- Metrics ---------------
+
+async def save_metrics(
+    session_id: str,
+    turn_number: int,
+    model_name: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    total_tokens: int,
+    details_json: str,
+    run_duration: float
+):
+    """Save metrics for a single run turn."""
+    metric_id = str(uuid.uuid4())
+    now = _now()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO metrics 
+               (id, session_id, turn_number, model_name, prompt_tokens, completion_tokens, total_tokens, details_json, run_duration, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (metric_id, session_id, turn_number, model_name, prompt_tokens, completion_tokens, total_tokens, details_json, run_duration, now),
+        )
+        await db.commit()
+
+
+async def get_metrics(session_id: str) -> list:
+    """Return all metrics for a session."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM metrics WHERE session_id = ? ORDER BY turn_number ASC",
+            (session_id,),
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+async def get_all_metrics() -> list:
+    """Return all metrics across all sessions."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("SELECT * FROM metrics ORDER BY created_at ASC")
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]

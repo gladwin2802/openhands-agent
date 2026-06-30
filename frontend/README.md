@@ -1,6 +1,6 @@
-# OpenHands Agent Frontend
+# Pydantic AI Agent Frontend
 
-The frontend of the OpenHands Agent IDE is a rich, single-page application built with **React** and **Vite**. It provides a VS Code-like experience tailored specifically for interacting with and reviewing the work of an AI coding agent.
+The frontend of the Pydantic AI Agent IDE is a rich, single-page application built with **React** and **Vite**. It provides a VS Code-like experience tailored specifically for interacting with and reviewing the work of an AI coding agent.
 
 ## User Interface Overview
 
@@ -8,7 +8,7 @@ The UI is divided into several resizable, context-aware panels:
 
 - **Activity Bar & Sidebars**: 
   - **Explorer**: A file tree to navigate the target workspace.
-  - **Sessions**: A list of current and historical agent task sessions.
+  - **Sessions**: A list of current and historical agent task sessions, with support for renaming and deleting sessions.
   - **Dashboard**: A metrics visualization panel for analyzing agent performance over time.
 - **Editor Area**: Powered by `@monaco-editor/react`, this pane allows you to view and directly edit the code files residing in the workspace.
 - **Bottom Panel**:

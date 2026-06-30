@@ -8,22 +8,59 @@ streaming all events to the UI via event_bus.
 import asyncio
 import os
 import traceback
-import uuid
+import json
+import time
 
 import database
 import event_bus
 
-# OpenHands SDK imports
-from openhands.sdk import LLM, Agent, Conversation, Tool
-from openhands.tools.file_editor import FileEditorTool
-from openhands.tools.task_tracker import TaskTrackerTool
-from openhands.tools.terminal import TerminalTool
-from openhands.sdk.event import ActionEvent, ObservationEvent, MessageEvent
+import logfire
+import contextvars
+
+# Context variables for safely passing session state to logfire in background threads
+session_ctx = contextvars.ContextVar("session_ctx", default="")
+main_loop_ctx = contextvars.ContextVar("main_loop_ctx", default=None)
+
+# Monkey-patch logfire console exporter to hide massive JSON schema dumps and forward events to UI
+try:
+    from logfire._internal.exporters.console import Record
+    original_from_span = Record.from_span
+
+    @classmethod
+    def custom_from_span(cls, span):
+        record = original_from_span(span)
+        if record.attributes is not None:
+            new_attrs = {}
+            for k, v in record.attributes.items():
+                if k not in ('model_request_parameters', 'model_response_parameters'):
+                    new_attrs[k] = v
+            record.attributes = new_attrs
+            
+        # We no longer stream real-time events to the UI here.
+        # Events are processed chronologically at the end of the turn in result.new_messages().
+            
+        return record
+
+    Record.from_span = custom_from_span
+except Exception:
+    pass
+
+logfire.configure(
+    send_to_logfire='never',
+    console=logfire.ConsoleOptions(verbose=True)
+)
+logfire.instrument_pydantic_ai()
+
+# Pydantic AI SDK imports
+from pydantic_ai import Agent
+from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.providers.openai import OpenAIProvider
+from pydantic_ai.usage import UsageLimits
+from pydantic_ai_harness import FileSystem, Shell
+from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart, ToolReturnPart, TextPart
 
 # Track running agent tasks so they can be cancelled
 _running_tasks: dict[str, asyncio.Task] = {}
-_running_conversations = {}
-_stream_buffers: dict[str, str] = {}
 
 import re
 
@@ -109,44 +146,42 @@ async def run_openhands_agent(session_id: str, prompt: str, workspace_path: str,
         await database.update_session_status(session_id, "running")
         await event_bus.emit(session_id, "status", {"status": "running"})
 
-        # 3. Initialize OpenHands SDK components
-        llm_model = os.getenv("LLM_MODEL")
+        # 3. Initialize Pydantic AI components
+        raw_llm_model = os.getenv("LLM_MODEL", "stepfun-ai/step-3.5-flash")
+        # Strip litellm provider prefix if present (e.g. "openai/deepseek..." -> "deepseek...")
+        if "/" in raw_llm_model and (raw_llm_model.startswith("openai/") or raw_llm_model.startswith("nvidia_nim/")):
+            llm_model = raw_llm_model.split("/", 1)[1]
+        else:
+            llm_model = raw_llm_model
+
         llm_api_key = os.getenv("LLM_API_KEY")
-        llm_base_url = os.getenv("LLM_BASE_URL")
+        if not llm_api_key:
+            llm_api_key = os.getenv("NVIDIA_API_KEY")
+        llm_base_url = os.getenv("LLM_BASE_URL", "https://integrate.api.nvidia.com/v1")
 
-        max_tokens = None
-        # max_tokens = 8192 if "minimax" in llm_model else None
-
-        llm = LLM(
-            model=llm_model,
-            api_key=llm_api_key,
-            base_url=llm_base_url,
-            max_output_tokens=max_tokens,
-            stream=True,
-            # native_tool_calling=False,
-            # litellm_extra_body={"parallel_tool_calls": True},
-        )
+        provider = OpenAIProvider(base_url=llm_base_url, api_key=llm_api_key)
+        model = OpenAIChatModel(llm_model, provider=provider)
 
         agent = Agent(
-            llm=llm,
-            tools=[
-                Tool(name=TerminalTool.name),
-                Tool(name=FileEditorTool.name),
-                Tool(name=TaskTrackerTool.name),
-            ]        
+            model,
+            instructions=(
+                "You are an expert developer. "
+                "Use the shell and filesystem tools to inspect, create, and modify files. "
+                "CRITICAL: When using tools like `run_command`, you MUST provide the required arguments (e.g. `command`). "
+                "Do not call tools with empty arguments. Always validate your work."
+            ),
+            capabilities=[
+                Shell(cwd=str(workspace_path)),
+                FileSystem(root_dir=str(workspace_path)),
+            ],
+            retries=5,
         )
 
-        orig_step = agent.step
-        def patched_step(*args, **kwargs):
-            action = orig_step(*args, **kwargs)
-            if action and action.__class__.__name__ == "TerminalAction":
-                if hasattr(action, "command") and isinstance(action.command, str):
-                    # PowerShell doesn't support && in this environment, replace with ;
-                    action.command = action.command.replace(" && ", " ; ").replace("&&", ";")
-            return action
-        object.__setattr__(agent, 'step', patched_step)
-
         main_loop = asyncio.get_running_loop()
+        
+        # Set context variables so background threads can emit real-time events
+        session_ctx.set(session_id)
+        main_loop_ctx.set(main_loop)
 
         # Databricks Setup
         if init_bundle and target_project:
@@ -162,183 +197,7 @@ async def run_openhands_agent(session_id: str, prompt: str, workspace_path: str,
                 # Abort the session
                 return
 
-        # 4. Create event callback to map OpenHands events → UI events
-        def on_event(event):
-            """Synchronous callback — schedule async emit on the event loop."""
-            loop = main_loop
-
-            if isinstance(event, MessageEvent):
-                if session_id in _stream_buffers:
-                    _stream_buffers.pop(session_id)
-
-                source = getattr(event, "source", "agent")
-                if source == "user":
-                    return
-                # Try to extract content string cleanly from Message object
-                content = ""
-                if hasattr(event, "llm_message") and event.llm_message:
-                    text_parts = []
-                    for c in getattr(event.llm_message, "content", []):
-                        if hasattr(c, "text"):
-                            text_parts.append(c.text)
-                    content = "".join(text_parts)
-                if not content:
-                    content = str(event)
-                
-                # Map agent source to 'assistant' to match the streaming token logic
-                # in the frontend which looks for role='assistant'
-                emit_role = "assistant" if source == "agent" else source
-                
-                asyncio.run_coroutine_threadsafe(
-                    event_bus.emit(session_id, "message", {
-                        "role": emit_role,
-                        "content": content,
-                        "streaming": False,
-                    }),
-                    loop,
-                )
-
-            elif isinstance(event, ActionEvent):
-                action = event.action
-                
-                # Emit the flushed stream buffer as a non-streaming message to seal the token stream and persist it
-                if session_id in _stream_buffers and _stream_buffers[session_id]:
-                    buffered_content = _stream_buffers.pop(session_id)
-                    asyncio.run_coroutine_threadsafe(
-                        event_bus.emit(session_id, "message", {
-                            "role": "assistant",
-                            "content": buffered_content,
-                            "streaming": False,
-                        }),
-                        loop,
-                    )
-
-                tool_name = getattr(event, "tool_name", "")
-                
-                # Terminal command execution
-                if tool_name == "terminal" or (action and action.__class__.__name__ == "TerminalAction"):
-                    command = getattr(action, "command", "")
-                    asyncio.run_coroutine_threadsafe(
-                        event_bus.emit(session_id, "terminal", {
-                            "type": "command",
-                            "content": command,
-                        }),
-                        loop,
-                    )
-                # File editing operations
-                elif tool_name == "file_editor" or (action and action.__class__.__name__ == "FileEditorAction"):
-                    file_path = getattr(action, "path", "unknown")
-                    cmd_type = getattr(action, "command", "modified")
-                    action_type = "created" if cmd_type == "create" else "modified"
-                    asyncio.run_coroutine_threadsafe(
-                        event_bus.emit(session_id, "file_changed", {
-                            "path": file_path,
-                            "action": action_type,
-                        }),
-                        loop,
-                    )
-                
-                # Check summary or metadata to emit an activity event
-                summary = getattr(event, "summary", "")
-                if summary:
-                    # Filter out raw JSON tool calls from cluttering the activity panel
-                    if not summary.startswith("task_tracker: {") and not summary.startswith("file_editor: {"):
-                        asyncio.run_coroutine_threadsafe(
-                            event_bus.emit(session_id, "activity", {
-                                "content": summary,
-                            }),
-                            loop,
-                        )
-
-            elif isinstance(event, ObservationEvent):
-                obs = getattr(event, "observation", None)
-                tool_name = getattr(event, "tool_name", "")
-                
-                def extract_obs_text(o):
-                    if hasattr(o, "visualize"):
-                        try:
-                            return o.visualize.plain
-                        except Exception:
-                            pass
-                            
-                    text = getattr(o, "text", "")
-                    if text: return text
-                    content = getattr(o, "content", "")
-                    if isinstance(content, str):
-                        return content
-                    if isinstance(content, list):
-                        parts = []
-                        for c in content:
-                            if hasattr(c, "text"):
-                                parts.append(c.text)
-                        return "".join(parts)
-                    return str(o)
-                
-                if obs:
-                    if tool_name == "terminal" or obs.__class__.__name__ == "TerminalObservation":
-                        # Extract CLI output
-                        output = extract_obs_text(obs)
-                        if not output.strip():
-                            output = "(No output)"
-                            
-                        asyncio.run_coroutine_threadsafe(
-                            event_bus.emit(session_id, "terminal", {
-                                "type": "output",
-                                "content": output,
-                            }),
-                            loop,
-                        )
-                    elif tool_name == "file_editor" or obs.__class__.__name__ == "FileEditorObservation":
-                        file_path = getattr(obs, "path", "unknown")
-                        cmd_type = getattr(obs, "command", "modified")
-                        action_type = "created" if cmd_type == "create" else "modified"
-                        asyncio.run_coroutine_threadsafe(
-                            event_bus.emit(session_id, "file_changed", {
-                                "path": file_path,
-                                "action": action_type,
-                            }),
-                            loop,
-                        )
-                    elif tool_name == "task_tracker" or obs.__class__.__name__ == "TaskTrackerObservation":
-                        output = extract_obs_text(obs)
-                        asyncio.run_coroutine_threadsafe(
-                            event_bus.emit(session_id, "task_update", {
-                                "content": output,
-                            }),
-                            loop,
-                        )
-
-        # Token streaming callback
-        def on_token(chunk):
-            """Stream LLM tokens to the UI."""
-            loop = main_loop
-            for choice in chunk.choices:
-                delta = choice.delta
-                if delta and hasattr(delta, "content") and delta.content:
-                    # Buffer content for persistence
-                    _stream_buffers[session_id] = _stream_buffers.get(session_id, "") + delta.content
-
-                    asyncio.run_coroutine_threadsafe(
-                        event_bus.emit(session_id, "message", {
-                            "role": "assistant",
-                            "content": delta.content,
-                            "streaming": True,
-                        }),
-                        loop,
-                    )
-
-        # 5. Create conversation and run
-        backend_dir = os.path.dirname(os.path.abspath(__file__))
-        conversation = Conversation(
-            agent=agent,
-            workspace=workspace_path,
-            persistence_dir=os.path.join(backend_dir, ".agent_runs"),
-            conversation_id=uuid.UUID(session_id),
-            callbacks=[on_event],
-            token_callbacks=[on_token],
-        )
-        _running_conversations[session_id] = conversation
-        
+        message_history = []
         instructions_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "instructions"))
         system_hint = f"\n\n[SYSTEM HINT: You are running on Windows. Your workspace path is {workspace_path}. IMPORTANT: The 'instructions' folder containing metadata and generated tasks is located at this absolute path: {instructions_path}. DO NOT look for an 'instructions' folder inside your workspace! Also, always use absolute paths for the FileEditorTool. Do not use UNIX paths. Use `;` instead of `&&` for multiple commands.]"
 
@@ -351,7 +210,7 @@ async def run_openhands_agent(session_id: str, prompt: str, workspace_path: str,
         
         for i, turn_task in enumerate(tasks):
             # Check if cancelled
-            if session_id not in _running_conversations:
+            if session_id not in _running_tasks:
                 break
                 
             await event_bus.emit(session_id, "activity", {"content": f"Starting Turn {i + 1} of {len(tasks)}..."})
@@ -363,10 +222,114 @@ async def run_openhands_agent(session_id: str, prompt: str, workspace_path: str,
                 turn_task = f"{turn_task}\n\n=== KNOWLEDGE ===\n{knowledge_text}"
             
             msg = turn_task + system_hint
-            conversation.send_message(msg)
 
-            # Run in a thread since conversation.run() is blocking
-            await asyncio.to_thread(conversation.run)
+            # Run agent sync in a thread
+            start_time = time.time()
+            result = await asyncio.to_thread(
+                agent.run_sync,
+                msg,
+                message_history=message_history,
+                usage_limits=UsageLimits(request_limit=150)
+            )
+            run_duration = time.time() - start_time
+            
+            # Carry forward the full conversation history to the next turn
+            message_history = result.all_messages()
+            
+            # Parse new messages and emit events
+            print(f"\n--- Detailed Agent Actions (Turn {i + 1}) ---")
+            for m in result.new_messages():
+                if isinstance(m, ModelResponse):
+                    for part in m.parts:
+                        if isinstance(part, TextPart):
+                            print(f"\n🤖 [Agent Thought / Response]:\n{part.content}\n")
+                            await event_bus.emit(session_id, "message", {
+                                "role": "assistant",
+                                "content": part.content,
+                                "streaming": False,
+                            })
+                        elif isinstance(part, ToolCallPart):
+                            # Extract arguments dictionary safely
+                            if hasattr(part, 'args_as_dict'):
+                                args_dict = part.args_as_dict()
+                            elif isinstance(part.args, dict):
+                                args_dict = part.args
+                            elif hasattr(part.args, 'args_dict'):
+                                args_dict = part.args.args_dict
+                            elif hasattr(part.args, 'model_dump'):
+                                args_dict = part.args.model_dump()
+                            else:
+                                try:
+                                    args_dict = json.loads(getattr(part.args, 'args_json', '{}'))
+                                except Exception:
+                                    args_dict = {}
+
+                            args_repr = args_dict if args_dict else str(part.args)
+                            print(f"🛠️  [Tool Call]: {part.tool_name}")
+                            print(f"    Arguments: {args_repr}")
+                            
+                            # Emit chronologically in UI
+                            await event_bus.emit(session_id, "tool_execution", {
+                                "content": f"⚙️ Executing tool: {part.tool_name}... ARGS: {args_repr}"
+                            })
+                            
+                            if isinstance(args_dict, dict) and part.tool_name.lower() in ("run_command", "bash", "shell", "cmd"):
+                                cmd_text = args_dict.get("command") or args_dict.get("cmd") or args_dict.get("script")
+                                if not cmd_text and args_dict:
+                                    # Fallback to the first value in the dictionary if the key is unknown
+                                    cmd_text = list(args_dict.values())[0]
+                                
+                                if cmd_text:
+                                    await event_bus.emit(session_id, "terminal", {
+                                        "type": "command",
+                                        "content": str(cmd_text),
+                                    })
+                                
+                            if "file" in part.tool_name.lower() or "write" in part.tool_name.lower():
+                                path_val = args_dict.get("path", "unknown") if isinstance(args_dict, dict) else "unknown"
+                                await event_bus.emit(session_id, "file_changed", {
+                                    "path": path_val,
+                                    "action": "modified",
+                                })
+                elif isinstance(m, ModelRequest):
+                    for part in m.parts:
+                        if isinstance(part, ToolReturnPart):
+                            output_str = str(part.content)
+                            print(f"✅ [Tool Return] ({part.tool_name}):")
+                            truncated_output = output_str if len(output_str) <= 500 else output_str[:500] + "... [TRUNCATED]"
+                            print(f"    {truncated_output}\n")
+                            
+                            tool_name_lower = part.tool_name.lower()
+                            if "shell" in tool_name_lower or "cmd" in tool_name_lower or "command" in tool_name_lower or "bash" in tool_name_lower:
+                                await event_bus.emit(session_id, "terminal", {
+                                    "type": "output",
+                                    "content": output_str,
+                                })
+                            else:
+                                await event_bus.emit(session_id, "activity", {
+                                    "content": f"Tool return ({part.tool_name}):\n{truncated_output}"
+                                })
+
+            # Save Metrics for the turn
+            try:
+                usage = result.usage
+                input_tokens = usage.input_tokens if hasattr(usage, "input_tokens") else 0
+                output_tokens = usage.output_tokens if hasattr(usage, "output_tokens") else 0
+                total_tokens = usage.total_tokens if hasattr(usage, "total_tokens") else (input_tokens + output_tokens)
+                details = usage.details if hasattr(usage, "details") else {}
+                
+                await database.save_metrics(
+                    session_id=session_id,
+                    turn_number=i + 1,
+                    model_name=llm_model,
+                    prompt_tokens=input_tokens,
+                    completion_tokens=output_tokens,
+                    total_tokens=total_tokens,
+                    details_json=json.dumps(details),
+                    run_duration=run_duration
+                )
+            except Exception as e:
+                print(f"Failed to save metrics: {e}")
 
         # 6. Snapshot after state
         await _snapshot_workspace(session_id, workspace_path, "after")
@@ -376,12 +339,6 @@ async def run_openhands_agent(session_id: str, prompt: str, workspace_path: str,
         await event_bus.emit(session_id, "status", {"status": "completed"})
 
     except asyncio.CancelledError:
-        conv = _running_conversations.get(session_id)
-        if conv:
-            try:
-                conv.close()
-            except Exception:
-                pass
         await database.update_session_status(session_id, "stopped")
         await event_bus.emit(session_id, "status", {"status": "stopped"})
     except Exception as e:
@@ -391,8 +348,6 @@ async def run_openhands_agent(session_id: str, prompt: str, workspace_path: str,
         await event_bus.emit(session_id, "status", {"status": "error"})
     finally:
         _running_tasks.pop(session_id, None)
-        _running_conversations.pop(session_id, None)
-        _stream_buffers.pop(session_id, None)
 
 
 async def start_agent(session_id: str, prompt: str, workspace_path: str, target_project: str = None, init_bundle: bool = False, default_catalog: str = None, personal_schema: str = None, language: str = None):
@@ -409,14 +364,6 @@ async def stop_agent(session_id: str) -> bool:
     task = _running_tasks.get(session_id)
     if task and not task.done():
         task.cancel()
-        cancelled = True
-        
-    conv = _running_conversations.get(session_id)
-    if conv:
-        try:
-            conv.close()
-        except Exception:
-            pass
         cancelled = True
         
     return cancelled

@@ -184,7 +184,7 @@ async def get_metrics(path: str = None):
     target_path = path or os.path.join(backend_dir, ".agent_runs")
     
     try:
-        data = metrics_parser.analyze_runs(target_path)
+        data = await metrics_parser.analyze_runs()
         
         # Inject task name from database
         sessions = await database.get_sessions()

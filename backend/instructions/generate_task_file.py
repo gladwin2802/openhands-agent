@@ -169,7 +169,6 @@ def generate_task_file(metadata_path: Path, output_path: Path, workspace_path: P
     lines.append("")
     lines.append("General Instructions:")
     lines.append("  - This task is driven by the dynamic metadata file. All generated files should be derived from its contents.")
-    lines.append("  - Use `task_tracker` to plan the work.")
     lines.append(f"  - The entity name to use is: '{entity_name}'.")
     lines.append("  - **CRITICAL: File Editing/Creation:** Do NOT write or edit files using multi-line PowerShell commands (such as `Set-Content`, `Out-File`, `echo`, or redirection `>`). Multi-line input in the interactive terminal often hangs on newlines (triggering nested prompts `>>`). Always use the specialized `FileEditor` tool (or Python script file writes) to create or modify file content.")
     lines.append("")
@@ -366,6 +365,7 @@ def generate_task_file(metadata_path: Path, output_path: Path, workspace_path: P
     lines.append("   - Setup Notebook (`setup.ipynb`) contains standard escaping `f\"` instead of double-escaped `f\\\"` in SQL statements.")
     lines.append("   - Target settings (such as `dev`) use `mode: production` instead of `mode: development` when separate target schemas are used to prevent Databricks from force-overriding DLT targets to a single schema.")
     lines.append("4. Proactively correct any logical errors, syntax issues, or target-schema discrepancies found during verification.")
+    lines.append("5. Run `databricks bundle validate` in the target project directory. If validation fails or reports warnings, analyze the output, locate the cause in your bundle resource YAMLs or Python scripts, and correct it until validation passes successfully.")
     
     # Dynamically update setup.ipynb
     dynamically_update_setup_ipynb(meta, entity_name, workspace_path)

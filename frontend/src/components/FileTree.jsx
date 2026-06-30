@@ -128,6 +128,12 @@ export default function FileTree({ sessionId, workspacePath, setWorkspacePath, s
 
   useEffect(() => {
     loadFiles();
+    
+    const interval = setInterval(() => {
+      loadFiles();
+    }, 5000);
+    
+    return () => clearInterval(interval);
   }, [sessionId, workspacePath, refreshTrigger]);
 
   const handleBrowseFolder = async () => {

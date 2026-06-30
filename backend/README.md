@@ -1,12 +1,12 @@
-# OpenHands Agent Backend
+# Pydantic AI Agent Backend
 
-The backend of the OpenHands Agent IDE is a robust Python server built with **FastAPI**. It acts as the bridge between the rich web frontend and the underlying AI agent (powered by the `openhands.sdk`). 
+The backend of the Pydantic AI Agent IDE is a robust Python server built with **FastAPI**. It acts as the bridge between the rich web frontend and the underlying AI agent (powered by **Pydantic AI**). 
 
 ## Core Responsibilities
 
 1. **Agent Orchestration (`agent_runner.py`)**: 
-   - Initializes and configures the OpenHands `Agent`, `LLM`, and `Conversation` instances.
-   - Intercepts granular SDK events (`MessageEvent`, `ActionEvent`, `ObservationEvent`) and streams them to the UI as standard JSON payloads.
+   - Initializes and configures the `pydantic_ai.Agent` and `OpenAIChatModel` instances.
+   - Intercepts model responses and tool calls and streams them to the UI as standard JSON payloads via the event bus.
 2. **Real-time Event Bus (`event_bus.py`)**: 
    - Manages WebSocket connections to the frontend, pushing live token streams, terminal commands, and file change notifications instantly.
 3. **Native Diffing (`diff_engine.py`)**: 
@@ -21,7 +21,7 @@ The backend of the OpenHands Agent IDE is a robust Python server built with **Fa
 
 ## Tech Stack
 - **Framework**: FastAPI (served via Uvicorn)
-- **Agent SDK**: `openhands-sdk`, `openhands-tools`
+- **Agent SDK**: `pydantic-ai`
 - **Database**: SQLite (via `aiosqlite`)
 - **Utilities**: `watchdog` (file system monitoring), `python-multipart`
 
