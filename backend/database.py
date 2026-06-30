@@ -198,7 +198,7 @@ async def get_events(session_id: str) -> list:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
-            "SELECT * FROM events WHERE session_id = ? ORDER BY created_at ASC",
+            "SELECT * FROM events WHERE session_id = ? ORDER BY created_at ASC, rowid ASC",
             (session_id,),
         )
         rows = await cursor.fetchall()

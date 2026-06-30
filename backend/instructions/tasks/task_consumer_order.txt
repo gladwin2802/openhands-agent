@@ -1,5 +1,5 @@
-IMPORTANT: Strictly in this BASE_PATH=C:\Users\Gladwin.aj\Downloads\workspace
 The terminal is Windows PowerShell 5.1. **CRITICAL**: Do NOT use `&&` or `||` to chain commands in terminal tool calls (PowerShell doesn't support them). Always run commands sequentially or use `;` as a separator.
+IMPORTANT: Strictly in the current workspace path, pwd output
 
 Starting point:
   - A metadata JSON file (e.g., metadata_consumer.json) exists in `instructions/metadata/` with a dynamic structure.
@@ -22,47 +22,53 @@ Folder structure to be created under demo/:
 
 General Instructions:
   - This task is driven by the dynamic metadata file. All generated files should be derived from its contents.
-  - Use `task_tracker` to plan the work.
   - The entity name to use is: 'consumer_order'.
+  - **CRITICAL: File Editing/Creation:** Do NOT write or edit files using multi-line PowerShell commands (such as `Set-Content`, `Out-File`, `echo`, or redirection `>`). Multi-line input in the interactive terminal often hangs on newlines (triggering nested prompts `>>`). Always use the specialized `FileEditor` tool (or Python script file writes) to create or modify file content.
 
 Coding Standards:
   - Use standard indentation (2 spaces for YAML, 4 for Python) and proper line breaks.
-  - Use Delta Live Tables (DLT) syntax (`import dlt`, `@dlt.table`).
+  - Use Lakeflow Declarative Pipelines (SDP) syntax (`from pyspark import pipelines as dp`).
   - Use `spark.conf.get()` to retrieve pipeline configuration values.
 
 **Turn 1: YAML Configuration (Bundle, Jobs, Pipelines)**
 
 1.  **databricks.yml**:
-    - Create/update `demo/databricks.yml` to support inclusion patterns (use glob patterns `resources/**/*.yml` to search subdirectories recursively).
-    - Define bundle variables: catalog, pipeline_schema, volume, target_schema, plus `bronze_target_schema` and `silver_target_schema`.
-      - WARNING: You MUST edit/create `demo/databricks.yml` and declare all of the requested variables and inclusion glob patterns.
+    - Create/update `demo/databricks.yml` to support inclusion patterns (always define the explicit list: `resources/*.yml`, `resources/*/*.yml`, and `resources/*/*/*.yml` recursively).
+    - Define bundle variables: catalog, pipeline_schema, volume, target_schema, bronze_target_schema, silver_target_schema, schema.
+      - WARNING: You MUST edit/create `demo/databricks.yml` and declare all of the requested variables with dynamic defaults (e.g., using `${bundle.target}` for `catalog` and `schema`, `landing` for `pipeline_schema`, `bronze` for `bronze_target_schema`, `silver` for `silver_target_schema`, `silver` for `target_schema`, and `data` for `volume`).
+      - Ensure that under target definitions (such as `dev` and `prod`), you omit hardcoded target-specific variable overrides and instead let them resolve dynamically from the defaults.
+      - Use dynamic workspace references (specifically `${workspace.current_user.userName}`) for settings like `root_path` and target permissions `user_name` to avoid hardcoding specific usernames or email addresses.
+      - **CRITICAL**: For target environments (such as `dev`) that utilize multiple distinct target schemas (e.g., `dev_bronze` and `dev_silver`) with cross-pipeline references, you MUST specify `mode: production` instead of `mode: development` in the target configuration block. This prevents Databricks CLI from overriding all pipeline targets to a single schema (like `dev`), which breaks cross-pipeline references.
 Make sure finally the databricks.yml structure after edit is proper
 2.  **Job YAML**:
     - Create `demo/resources/jobs/consumer_order_job.yml` named: `consumer_order_workflow`.
-    - Configure job trigger with `pause_status: UNPAUSED` and `file_arrival` with url: `/Volumes/{catalog}/{pipeline_schema}/{volume}/consumer_order/`.
+    - Configure job trigger with `pause_status: UNPAUSED` and `file_arrival` with url: `/Volumes/${var.catalog}/${var.pipeline_schema}/${var.volume}/consumer_order/`.
     - Set up tasks: bronze, silver with dependencies matching the flow in metadata.
       - **CRITICAL**: When referencing pipeline IDs (e.g. `pipeline_id`), reference the flat resource key directly. Do NOT include the folder path or entity namespace inside the key (e.g., use `${resources.pipelines.consumer_order_bronze_pipeline.id}` instead of `${resources.pipelines.consumer_order.consumer_order_bronze_pipeline.id}`).
 
 3.  **Pipeline YAMLs**:
-    - Create serverless DLT pipeline configuration `demo/resources/pipelines/consumer_order/consumer_order_bronze_pipeline.yml`.
-      - Target should be: `consumer_order_bronze`.
+    - Create Lakeflow pipeline configuration `demo/resources/pipelines/consumer_order/consumer_order_bronze_pipeline.yml`.
+      - Target should be: `${var.bronze_target_schema}`.
       - Catalog should be: `${var.catalog}`.
       - Libraries should list these file paths under the `- file:` parameter (since they are raw python scripts, NOT notebooks, relative to the pipeline config folder):
         - `../../../src/consumer_order/consumer_order_bronze/transformations/landing.py`
         - `../../../src/consumer_order/consumer_order_bronze/transformations/bronze.py`
-      - Pass configuration variables: catalog, pipeline_schema, volume, and target_schema (which should be set to `consumer_order_bronze`).
-    - Create serverless DLT pipeline configuration `demo/resources/pipelines/consumer_order/consumer_order_silver_pipeline.yml`.
-      - Target should be: `consumer_order_silver`.
+      - Pass configuration variables: catalog, pipeline_schema, volume, and target_schema (which should be set to `${var.bronze_target_schema}`).
+    - Create Lakeflow pipeline configuration `demo/resources/pipelines/consumer_order/consumer_order_silver_pipeline.yml`.
+      - Target should be: `${var.silver_target_schema}`.
       - Catalog should be: `${var.catalog}`.
       - Libraries should list this file path under the `- file:` parameter (since it is a raw python script, NOT a notebook, relative to the pipeline config folder):
         - `../../../src/consumer_order/consumer_order_silver/transformations/silver.py`
-      - Pass configuration variables: catalog, pipeline_schema, volume, and target_schema (which should be set to `consumer_order_silver`). Do NOT pass `bronze_schema`.
+      - Pass configuration variables: catalog, pipeline_schema, volume, and target_schema (which should be set to `${var.silver_target_schema}`). Do NOT pass `bronze_schema`.
 
 4.  **Bootstrap / Orchestration Setup (Bootstrap Part)**:
-    - Update/Create `instructions/metadata/project_metadata.json`:
-      - If the file is missing, initialize it with a basic skeleton containing `schema_version`, `project_name`, `global_config` and `bootstrap` object (having `job_name`, `setup_notebook_path`, `entities` list, and `dependency_graph` containing the `setup` notebook task).
-      - Add the entity details (name, folder path, and job resource key `consumer_order_workflow`) to the `bootstrap.entities` array.
-      - Add a corresponding orchestration task `run_consumer_order_job` of type `run_job_task` referencing `consumer_order_workflow` job to the `bootstrap.dependency_graph` under the correct dependency sequence.
+    - **Overwrite/Create** `instructions/metadata/project_metadata.json`:
+      - Clear and overwrite this file completely on every run so that it only represents the current target project (`demo`) and the last/active entity run.
+      - The file should only contain a basic skeleton with `schema_version`, `project_name` (`demo`), `global_config`, and the current entity details (name, folder path, and job resource key `consumer_order_workflow`) in the `bootstrap.entities` array, plus the setup task and the single active task `run_consumer_order_job` in `bootstrap.dependency_graph`.
+    - **Update/Create** `demo/demo_metadata.json`:
+      - If this file is missing in the target project root, initialize it with a basic skeleton containing `schema_version`, `project_name` (`demo`), `global_config` and `bootstrap` object (having `job_name`, `setup_notebook_path`, `entities` list, and `dependency_graph` containing the `setup` notebook task).
+      - Add/append the entity details (name, folder path, and job resource key `consumer_order_workflow`) to the `bootstrap.entities` array (preserving existing entries).
+      - Add/append the corresponding orchestration task `run_consumer_order_job` of type `run_job_task` referencing the `consumer_order_workflow` job to the `bootstrap.dependency_graph` under the correct dependency sequence (preserving existing tasks, making this new task run sequentially after the previous entity's task).
     - `demo/src/bootstrap/setup.ipynb`:
       - If this file is missing, create it using the base JSON notebook template defined in knowledge.
       - (Note: The task generator has already dynamically registered this entity, but if the notebook is recreated from scratch, ensure the `input_file_paths` dictionary includes this entity's mapping.)
@@ -74,7 +80,8 @@ Make sure finally the databricks.yml structure after edit is proper
 
 1.  **landing.py** (in the bronze pipeline transformations folder):
     - **CRITICAL**: Construct the landing path dynamically by reading configuration values `catalog`, `pipeline_schema`, and `volume` from Spark conf (via `spark.conf.get()`). Do NOT hardcode or use fallback literals containing bundle-style variables like `"/Volumes/${var.catalog}..."` in Python code.
-    - Read stream in format `cloudFiles` from landing path.
+    - Create raw stream as a streaming table. First define the table using `dp.create_streaming_table("{entity_name}_raw_stream")`, then decorate the loading function with `@dp.append_flow(target="{entity_name}_raw_stream")`.
+    - Inside the decorated function, read stream in format `cloudFiles` from the landing path.
     - Configure Auto Loader option `cloudFiles.format` as `json`.
     - Configure reader options: multiLine=True.
     - Define explicit PySpark schema: order_id (integer), consumer_id (integer), order_date (string), order_status (string), total_amount (double), currency (string), payment_method (string), channel (string), billing_address (string), shipping_address (string), operation (string).
@@ -83,32 +90,34 @@ Make sure finally the databricks.yml structure after edit is proper
       - CDC Type: `scd2`
       - Keys: order_id
       - Sequence by: `ingestion_time`
-      - Operation column: `operation` (deletes when value is 'delete', specified using a Column expression like `col("operation") == "delete"`)
-      - **CRITICAL**: Do NOT decorate the function executing `dlt.apply_changes` with `@dlt.table` and return its output. Instead, create the streaming table first via `dlt.create_streaming_table("consumer_order_cdc_stream")`, read the raw stream inside a separate `@dlt.view` function, and execute `dlt.apply_changes` at the module level (outside any decorated function).
+      - Operation column: `operation` (deletes when value is 'delete', specified using an expression like `expr("operation = 'delete'")` or similar target condition)
+      - **CRITICAL**: Use Lakeflow SDP syntax. Create a target streaming table via `dp.create_streaming_table("consumer_order_cdc_stream")` and define the CDC flow at the module level using `dp.create_auto_cdc_flow(source="consumer_order_raw_stream", target="consumer_order_cdc_stream", name="cdc_consumer_order_flow", keys=..., sequence_by=..., apply_as_deletes=..., stored_as_scd_type="2")`.
 
 2.  **bronze.py** (in the bronze pipeline transformations folder):
-    - Create materialized view `consumer_order_mv` reading from `consumer_order_cdc_stream` using `dlt.read("consumer_order_cdc_stream")` (do NOT use legacy `spark.read.table("LIVE.consumer_order_cdc_stream")`).
+    - Retrieve `catalog_config` and `schema_config` dynamically from Spark configuration.
+    - Create materialized view `consumer_order_mv` using `@dp.materialized_view(name=f"{catalog_config}.{schema_config}.consumer_order_mv")` reading from `consumer_order_cdc_stream` using `spark.read.table("consumer_order_cdc_stream")`.
     - Apply filters: __START_AT IS NOT NULL AND __END_AT IS NULL.
     - Drop columns: operation, ingestion_time, __START_AT, __END_AT, __OPERATION.
 
 3.  **silver.py** (in the silver pipeline transformations folder):
-    - Create materialized view `consumer_order_mv` reading from the external bronze table `consumer_order_mv` using `spark.read.table(f"{catalog}.{bronze_schema}.consumer_order_mv")` where `catalog` and `target_schema` are retrieved from Spark conf (retrieved via `SparkSession.getActiveSession().conf.get(...)`), and `bronze_schema` is resolved dynamically in Python by replacing `_silver` with `_bronze` in `target_schema`.
+    - Create materialized view `consumer_order_mv` reading from the external bronze table `consumer_order_mv` using `spark.read.table(f"{catalog}.{bronze_schema}.consumer_order_mv")` where `catalog` and `target_schema` are retrieved from Spark conf (retrieved via `SparkSession.getActiveSession().conf.get(...)`), and `bronze_schema` is resolved dynamically in Python by replacing `silver` with `bronze` in `target_schema`.
       - **CRITICAL**: Retrieve the catalog name from Spark configuration using the flat key `"catalog"` (via `spark.conf.get("catalog", "main")`). Do NOT check keys like `"target.catalog"` or `"bundle.catalog"` as they are not defined in the configuration block.
       - **CRITICAL**: Ensure SparkSession is imported correctly: `from pyspark.sql import SparkSession`. Do NOT import it from `pyspark.sql.functions`.
-    - Apply DLT data quality expectations: valid_order_id (order_id IS NOT NULL -> action: drop).
+    - Apply data quality expectations: valid_order_id (order_id IS NOT NULL -> action: drop) stacked directly on the materialized view definition function (e.g. `@dp.expect(...)`).
     - Apply column transformations:
       - Rule `trim` on columns: order_status, currency, payment_method, channel, billing_address, shipping_address.
       - Rule `to_date` on columns: order_date (params: {'format': 'yyyy-MM-dd'}).
     - Declare informational primary key constraints on `consumer_order_mv` (Primary Key: order_id):
-      - **CRITICAL**: Do NOT execute raw `spark.sql("ALTER TABLE ...")` statements at the module level in your transformation Python files. This runs during import/compilation time and causes DLT validation to fail.
-      - Instead, specify the informational primary key constraint inside the `@dlt.table(schema="...")` decorator parameter using a DDL schema string containing columns and types with `NOT NULL PRIMARY KEY` specified on key column(s).
+      - **CRITICAL**: Do NOT execute raw `spark.sql("ALTER TABLE ...")` statements at the module level in your transformation Python files. This runs during import/compilation time and causes validation to fail.
+      - Instead, specify the informational primary key constraint inside the `@dp.materialized_view(schema="...")` decorator parameter using a DDL schema string containing columns and types with `NOT NULL PRIMARY KEY` specified on key column(s).
     - Implement referential integrity check expectations for relationships:
       - Validate relationship `fk_consumer_order_to_consumer`: local keys `consumer_id` must reference `consumer` keys `consumer_id`.
         - Implementation Steps to prevent schema pollution and column name collisions:
-          1. Load the parent table `consumer_mv` using `spark.read.table(f"{catalog}.consumer_bronze.consumer_mv")`.
+          1. Load the parent table `consumer_mv` using `spark.read.table(f"{catalog}.{bronze_schema}.consumer_mv")` where `bronze_schema` is resolved by replacing `silver` with `bronze` in the current `target_schema`.
           2. Select only key column(s) from the parent table, renaming them to avoid name collisions (e.g. rename `consumer_id` to `parent_consumer_id`).
           3. Perform a left join of the child table with the parent key subset on the matching keys (e.g. `df.join(parent_df, df["consumer_id"] == parent_df["parent_consumer_id"], "left")`).
-          4. Apply the DLT expectation `@dlt.expect_or_drop("valid_fk_consumer_order_to_consumer", "parent_consumer_id IS NOT NULL")`. Note that this validation column must remain in the returned DataFrame so that DLT can evaluate the expectation against the schema.
+          4. Apply the expect or drop decorator (e.g., `@dp.expect_or_drop("valid_fk_consumer_order_to_consumer", "parent_consumer_id IS NOT NULL")`) stacked on the materialized view function.
+          5. **CRITICAL**: To prevent schema pollution and avoid writing the helper validation column `parent_consumer_id` to the target database table, you MUST declare an explicit DDL schema string inside the `@dp.materialized_view(schema="...")` decorator parameter listing only target silver columns. Lakeflow will automatically project and drop any extra helper validation columns from the written output.
 
 **Turn 3: Final Verification & Logical Correctness Audit**
 
@@ -116,7 +125,12 @@ Make sure finally the databricks.yml structure after edit is proper
 2. Verify that the files match all configuration values in the metadata file.
 3. Perform a thorough audit of the code and configuration for logical errors. Specifically verify:
    - All referenced bundle variables (like `${var.volume}`) are defined under the `variables` section in `demo/databricks.yml`.
-   - The inclusion pattern in `demo/databricks.yml` is recursive (e.g. `resources/pipelines/**/*.yml`).
+   - All variables overridden or assigned under target `variables` blocks (such as `schema`) are declared in the top-level `variables` section of `demo/databricks.yml`.
+   - The inclusion pattern in `demo/databricks.yml` is defined as the explicit three-tier pattern list.
    - `silver.py` replacement mapping logic works dynamically. For instance, if `target_schema` is set to `distributor_silver`, replacing `_silver` with `_bronze` correctly resolves to `distributor_bronze` (which matches the bronze pipeline's target schema).
    - There are **no** module-level `spark.sql` statements executing DDL commands.
+   - All PySpark SQL functions referenced in transformation scripts (such as `col`, `trim`, `to_date`, `when`) are explicitly imported from `pyspark.sql.functions`.
+   - Setup Notebook (`setup.ipynb`) contains standard escaping `f"` instead of double-escaped `f\"` in SQL statements.
+   - Target settings (such as `dev`) use `mode: production` instead of `mode: development` when separate target schemas are used to prevent Databricks from force-overriding DLT targets to a single schema.
 4. Proactively correct any logical errors, syntax issues, or target-schema discrepancies found during verification.
+5. Run `databricks bundle validate` in the target project directory. If validation fails or reports warnings, analyze the output, locate the cause in your bundle resource YAMLs or Python scripts, and correct it until validation passes successfully.

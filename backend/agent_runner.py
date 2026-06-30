@@ -162,18 +162,137 @@ async def run_openhands_agent(session_id: str, prompt: str, workspace_path: str,
         provider = OpenAIProvider(base_url=llm_base_url, api_key=llm_api_key)
         model = OpenAIChatModel(llm_model, provider=provider)
 
+        def _emit_sync(event_type: str, data: dict):
+            loop = main_loop_ctx.get()
+            if loop:
+                asyncio.run_coroutine_threadsafe(event_bus.emit(session_id, event_type, data), loop).result()
+
+        original_request = model.request
+        _emitted_activities = set()
+        
+        async def custom_request(messages, *args, **kwargs):
+            from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart, ToolReturnPart, TextPart, RetryPromptPart
+            
+            # 1. Print and emit any tool returns from the LAST message
+            if messages:
+                last_msg = messages[-1]
+                if isinstance(last_msg, ModelRequest):
+                    for part in last_msg.parts:
+                        if isinstance(part, ToolReturnPart):
+                            part_id = getattr(part, 'tool_call_id', None) or part.tool_name
+                            # Add content hash to distinguish same tool if tool_call_id is missing
+                            part_hash = f"{part_id}_{hash(str(part.content)[:100])}"
+                            if part_hash in _emitted_activities:
+                                continue
+                            _emitted_activities.add(part_hash)
+                            
+                            output_str = str(part.content)
+                            print(f"✅ [LIVE Tool Return] ({part.tool_name}):")
+                            truncated_output = output_str if len(output_str) <= 500 else output_str[:500] + "... [TRUNCATED]"
+                            print(f"    {truncated_output}\n")
+                            
+                            ui_return_data = output_str
+                            if len(ui_return_data) > 2000:
+                                ui_return_data = ui_return_data[:2000] + "\n... [TRUNCATED]"
+                            
+                            tool_name_lower = part.tool_name.lower()
+                            if "shell" in tool_name_lower or "cmd" in tool_name_lower or "command" in tool_name_lower or "bash" in tool_name_lower:
+                                _emit_sync("terminal", {
+                                    "type": "output",
+                                    "content": ui_return_data,
+                                })
+                            
+                            _emit_sync("activity", {
+                                "tool_name": part.tool_name,
+                                "tool_call_id": getattr(part, 'tool_call_id', None),
+                                "return_data": ui_return_data,
+                                "content": f"Tool return ({part.tool_name}):\n{truncated_output}"
+                            })
+                        elif isinstance(part, RetryPromptPart):
+                            print(f"❌ [LIVE Tool Retry/Error] ({part.tool_name}): {part.content}")
+                            error_str = str(part.content)
+                            _emit_sync("activity", {
+                                "tool_name": part.tool_name,
+                                "tool_call_id": getattr(part, 'tool_call_id', None),
+                                "return_data": f"Validation Error / Retry:\n{error_str}",
+                                "content": f"Validation Error / Retry ({part.tool_name}):\n{error_str}"
+                            })
+
+            # 2. Perform the actual LLM request
+            response = await original_request(messages, *args, **kwargs)
+            
+            # 3. Print and emit the LLM's response (thoughts & tool calls)
+            if isinstance(response, ModelResponse):
+                for part in response.parts:
+                    if isinstance(part, TextPart):
+                        print(f"\n🤖 [LIVE Agent Thought]:\n{part.content}\n")
+                        _emit_sync("message", {
+                            "role": "assistant",
+                            "content": part.content,
+                            "streaming": False,
+                        })
+                    elif isinstance(part, ToolCallPart):
+                        # Extract arguments dictionary safely
+                        if hasattr(part, 'args_as_dict'):
+                            args_dict = part.args_as_dict()
+                        elif isinstance(part.args, dict):
+                            args_dict = part.args
+                        elif hasattr(part.args, 'args_dict'):
+                            args_dict = part.args.args_dict
+                        elif hasattr(part.args, 'model_dump'):
+                            args_dict = part.args.model_dump()
+                        else:
+                            try:
+                                args_dict = json.loads(getattr(part.args, 'args_json', '{}'))
+                            except Exception:
+                                args_dict = {}
+
+                        args_repr = args_dict if args_dict else str(part.args)
+                        print(f"🛠️  [LIVE Tool Call]: {part.tool_name}")
+                        print(f"    Arguments: {args_repr}")
+                        
+                        _emit_sync("tool_execution", {
+                            "tool_name": part.tool_name,
+                            "tool_call_id": getattr(part, 'tool_call_id', None),
+                            "args": args_dict if isinstance(args_dict, dict) else args_repr,
+                            "content": f"⚙️ Executing tool: {part.tool_name}... ARGS: {args_repr}"
+                        })
+                        
+                        if isinstance(args_dict, dict) and part.tool_name.lower() in ("run_command", "bash", "shell", "cmd"):
+                            cmd_text = args_dict.get("command") or args_dict.get("cmd") or args_dict.get("script")
+                            if not cmd_text and args_dict:
+                                cmd_text = list(args_dict.values())[0]
+                            if cmd_text:
+                                _emit_sync("terminal", {
+                                    "type": "command",
+                                    "content": str(cmd_text),
+                                })
+                        
+                        tool_name_l = part.tool_name.lower()
+                        if tool_name_l in ("write_file", "write_to_file", "edit_file", "replace_file_content", "multi_replace_file_content"):
+                            path_val = args_dict.get("path", "unknown") if isinstance(args_dict, dict) else "unknown"
+                            _emit_sync("file_changed", {
+                                "path": path_val,
+                                "action": "modified",
+                            })
+            return response
+            
+        model.request = custom_request
+
         agent = Agent(
             model,
             instructions=(
                 "You are an expert developer. "
-                "Use the shell and filesystem tools to inspect, create, and modify files. "
-                "CRITICAL: When using tools like `run_command`, you MUST provide the required arguments (e.g. `command`). "
+                "CRITICAL: ALWAYS use the native FileSystem tools (e.g., `read_file`, `write_file`, `edit_file`) for file operations instead of running shell commands. "
+                "Do NOT use shell commands like `type` or `cat` to read files. "
+                "When using tools like `run_command`, you MUST provide the required arguments (e.g. `command`). "
                 "Do not call tools with empty arguments. Always validate your work."
             ),
             capabilities=[
                 Shell(cwd=str(workspace_path)),
                 FileSystem(root_dir=str(workspace_path)),
             ],
+            model_settings={'parallel_tool_calls': True},
             retries=5,
         )
 
@@ -187,7 +306,7 @@ async def run_openhands_agent(session_id: str, prompt: str, workspace_path: str,
         if init_bundle and target_project:
             from databricks_setup import setup_databricks_bundle
             async def emit_activity(msg: str):
-                await event_bus.emit(session_id, "activity", {"content": msg})
+                await event_bus.emit(session_id, "message", {"role": "assistant", "content": msg, "streaming": False})
             try:
                 await setup_databricks_bundle(workspace_path, target_project, default_catalog, personal_schema, language, emit_activity)
             except Exception as e:
@@ -199,7 +318,7 @@ async def run_openhands_agent(session_id: str, prompt: str, workspace_path: str,
 
         message_history = []
         instructions_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "instructions"))
-        system_hint = f"\n\n[SYSTEM HINT: You are running on Windows. Your workspace path is {workspace_path}. IMPORTANT: The 'instructions' folder containing metadata and generated tasks is located at this absolute path: {instructions_path}. DO NOT look for an 'instructions' folder inside your workspace! Also, always use absolute paths for the FileEditorTool. Do not use UNIX paths. Use `;` instead of `&&` for multiple commands.]"
+        system_hint = f"\n\n[SYSTEM HINT: You are running on Windows. Your workspace path is {workspace_path}. IMPORTANT: For reading or modifying files, exclusively use the native file tools (e.g., read_file) rather than run_command. For shell execution, use standard cmd.exe syntax. The 'instructions' folder containing metadata and generated tasks is located at this absolute path: {instructions_path}. DO NOT look for an 'instructions' folder inside your workspace! Trust the provided directory tree; do not guess file paths or check for files that aren't in the tree.]"
 
         # Dynamically inject the target project directory into the task content
         if target_project:
@@ -213,7 +332,21 @@ async def run_openhands_agent(session_id: str, prompt: str, workspace_path: str,
             if session_id not in _running_tasks:
                 break
                 
-            await event_bus.emit(session_id, "activity", {"content": f"Starting Turn {i + 1} of {len(tasks)}..."})
+            await event_bus.emit(session_id, "message", {"role": "assistant", "content": f"Starting Turn {i + 1} of {len(tasks)}...", "streaming": False})
+            
+            # Inject Workspace Directory Tree for Turn 1
+            if i == 0:
+                import seedir
+                project_tree = seedir.seedir(
+                    workspace_path,
+                    style='spaces',
+                    printout=False,
+                    depthlimit=4,
+                    exclude_folders=['.git', 'node_modules', '__pycache__', 'venv', '.venv', '.vscode', '.idea']
+                )
+                turn_task = f"{turn_task}\n\n=== CURRENT WORKSPACE DIRECTORY STRUCTURE ===\n{project_tree}\n=============================================\nCRITICAL INSTRUCTION: The complete workspace directory structure is provided above. DO NOT execute any tools or commands to list or search the directory (e.g., `list_directory`, `find_files`, `dir`, `ls`, `tree`, `Get-ChildItem`). Proceed directly to reading the required files and writing code."
+            elif i == 2:
+                turn_task = f"{turn_task}\n\nCRITICAL INSTRUCTION: If any other files/folders were created in the workspace other than the instructed ones for the DAB project, you MUST remove them."
             
             knowledge_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "instructions", "knowledge.txt")
             if os.path.exists(knowledge_path):
@@ -236,79 +369,7 @@ async def run_openhands_agent(session_id: str, prompt: str, workspace_path: str,
             # Carry forward the full conversation history to the next turn
             message_history = result.all_messages()
             
-            # Parse new messages and emit events
-            print(f"\n--- Detailed Agent Actions (Turn {i + 1}) ---")
-            for m in result.new_messages():
-                if isinstance(m, ModelResponse):
-                    for part in m.parts:
-                        if isinstance(part, TextPart):
-                            print(f"\n🤖 [Agent Thought / Response]:\n{part.content}\n")
-                            await event_bus.emit(session_id, "message", {
-                                "role": "assistant",
-                                "content": part.content,
-                                "streaming": False,
-                            })
-                        elif isinstance(part, ToolCallPart):
-                            # Extract arguments dictionary safely
-                            if hasattr(part, 'args_as_dict'):
-                                args_dict = part.args_as_dict()
-                            elif isinstance(part.args, dict):
-                                args_dict = part.args
-                            elif hasattr(part.args, 'args_dict'):
-                                args_dict = part.args.args_dict
-                            elif hasattr(part.args, 'model_dump'):
-                                args_dict = part.args.model_dump()
-                            else:
-                                try:
-                                    args_dict = json.loads(getattr(part.args, 'args_json', '{}'))
-                                except Exception:
-                                    args_dict = {}
-
-                            args_repr = args_dict if args_dict else str(part.args)
-                            print(f"🛠️  [Tool Call]: {part.tool_name}")
-                            print(f"    Arguments: {args_repr}")
-                            
-                            # Emit chronologically in UI
-                            await event_bus.emit(session_id, "tool_execution", {
-                                "content": f"⚙️ Executing tool: {part.tool_name}... ARGS: {args_repr}"
-                            })
-                            
-                            if isinstance(args_dict, dict) and part.tool_name.lower() in ("run_command", "bash", "shell", "cmd"):
-                                cmd_text = args_dict.get("command") or args_dict.get("cmd") or args_dict.get("script")
-                                if not cmd_text and args_dict:
-                                    # Fallback to the first value in the dictionary if the key is unknown
-                                    cmd_text = list(args_dict.values())[0]
-                                
-                                if cmd_text:
-                                    await event_bus.emit(session_id, "terminal", {
-                                        "type": "command",
-                                        "content": str(cmd_text),
-                                    })
-                                
-                            if "file" in part.tool_name.lower() or "write" in part.tool_name.lower():
-                                path_val = args_dict.get("path", "unknown") if isinstance(args_dict, dict) else "unknown"
-                                await event_bus.emit(session_id, "file_changed", {
-                                    "path": path_val,
-                                    "action": "modified",
-                                })
-                elif isinstance(m, ModelRequest):
-                    for part in m.parts:
-                        if isinstance(part, ToolReturnPart):
-                            output_str = str(part.content)
-                            print(f"✅ [Tool Return] ({part.tool_name}):")
-                            truncated_output = output_str if len(output_str) <= 500 else output_str[:500] + "... [TRUNCATED]"
-                            print(f"    {truncated_output}\n")
-                            
-                            tool_name_lower = part.tool_name.lower()
-                            if "shell" in tool_name_lower or "cmd" in tool_name_lower or "command" in tool_name_lower or "bash" in tool_name_lower:
-                                await event_bus.emit(session_id, "terminal", {
-                                    "type": "output",
-                                    "content": output_str,
-                                })
-                            else:
-                                await event_bus.emit(session_id, "activity", {
-                                    "content": f"Tool return ({part.tool_name}):\n{truncated_output}"
-                                })
+            print(f"\n--- Turn {i + 1} Completed ---")
 
             # Save Metrics for the turn
             try:

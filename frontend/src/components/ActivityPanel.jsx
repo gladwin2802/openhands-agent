@@ -12,6 +12,67 @@ const Chevron = ({ expanded }) => (
   </svg>
 );
 
+const ToolCallDropdown = ({ event }) => {
+  const [expanded, setExpanded] = useState(false);
+  const { event_type, payload = {}, returns = [], pending = false } = event;
+  
+  if (event_type === 'tool_execution') {
+    const toolName = payload.tool_name || 'Tool';
+    let argsText = payload.args;
+    if (typeof payload.args === 'object') {
+      try {
+        argsText = JSON.stringify(payload.args, null, 2);
+      } catch (e) {
+        argsText = String(payload.args);
+      }
+    }
+    
+    return (
+      <div className="sub-event-item" style={{ display: 'flex', flexDirection: 'column', width: '100%', marginBottom: '4px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', color: 'var(--text-secondary)' }} onClick={() => setExpanded(!expanded)}>
+          <Chevron expanded={expanded} />
+          <span style={{ fontWeight: '500', marginLeft: '4px', display: 'flex', alignItems: 'center' }}>
+            ⚙️ Executing {toolName}
+            {pending && <span className="spinner" style={{ width: '12px', height: '12px', marginLeft: '8px', opacity: 0.6 }} />}
+            {!pending && returns.length > 0 && <span style={{ marginLeft: '8px', color: 'var(--status-success)', fontSize: '0.9em' }}>✓</span>}
+          </span>
+        </div>
+        {expanded && (
+          <div style={{ marginLeft: '22px', marginTop: '6px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            {argsText && (
+              <div style={{ padding: '8px', background: 'rgba(0,0,0,0.15)', borderRadius: '4px', fontFamily: 'var(--font-mono)', fontSize: '0.85rem', whiteSpace: 'pre-wrap', color: 'var(--text-muted)', overflowX: 'auto', border: '1px solid var(--surface-border)' }}>
+                <strong style={{color: 'var(--text-primary)'}}>Arguments:</strong><br/>{argsText}
+              </div>
+            )}
+            {returns.map((ret, i) => (
+              <div key={i} style={{ padding: '8px', background: 'rgba(0,0,0,0.2)', borderRadius: '4px', fontFamily: 'var(--font-mono)', fontSize: '0.85rem', whiteSpace: 'pre-wrap', color: 'var(--text-primary)', overflowX: 'auto', border: '1px solid var(--surface-border)' }}>
+                <strong style={{color: 'var(--accent-primary)'}}>Return:</strong><br/>{ret.payload?.return_data || ret.payload?.content}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  } else if (event_type === 'activity') {
+    const toolName = payload.tool_name || 'Tool';
+    return (
+      <div className="sub-event-item" style={{ display: 'flex', flexDirection: 'column', width: '100%', marginBottom: '4px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', color: 'var(--text-secondary)' }} onClick={() => setExpanded(!expanded)}>
+          <Chevron expanded={expanded} />
+          <span style={{ fontWeight: '500', marginLeft: '4px' }}>Return from {toolName}</span>
+        </div>
+        {expanded && payload.return_data && (
+          <div style={{ marginLeft: '22px', marginTop: '6px', padding: '8px', background: 'rgba(0,0,0,0.15)', borderRadius: '4px', fontFamily: 'var(--font-mono)', fontSize: '0.85rem', whiteSpace: 'pre-wrap', color: 'var(--text-muted)', overflowX: 'auto', border: '1px solid var(--surface-border)' }}>
+            {payload.return_data}
+          </div>
+        )}
+      </div>
+    );
+  }
+  return null;
+};
+
+
 const renderSubEventContent = (event) => {
   const payload = event.payload || {};
   if (event.event_type === 'file_changed') {
@@ -30,13 +91,12 @@ const renderSubEventContent = (event) => {
     return <span className="sub-event-item" style={{ color: 'var(--status-error)' }}>❌ {payload.content || 'Unknown error'}</span>;
   }
   if (event.event_type === 'activity') {
+    if (payload.tool_name) return <ToolCallDropdown event={event} />;
     return <span className="sub-event-item" style={{ color: 'var(--text-secondary)' }}>{payload.content || ''}</span>;
   }
   if (event.event_type === 'tool_execution') {
+    if (payload.tool_name) return <ToolCallDropdown event={event} />;
     return <span className="sub-event-item" style={{ color: 'var(--text-secondary)' }}>{payload.content || ''}</span>;
-  }
-  if (event.event_type === 'task_update') {
-    return <span className="sub-event-item" style={{ whiteSpace: 'pre-wrap', fontFamily: 'var(--font-mono)' }}>{payload.content || ''}</span>;
   }
   return <span className="sub-event-item">{JSON.stringify(payload)}</span>;
 };
@@ -45,13 +105,18 @@ const ActionSubGroup = ({ type, events }) => {
   const [expanded, setExpanded] = useState(false);
   
   let title = '';
-  if (type === 'file_changed') title = `Explored ${events.length} file${events.length > 1 ? 's' : ''}`;
-  else if (type === 'terminal') title = `Executed ${events.length} terminal action${events.length > 1 ? 's' : ''}`;
-  else if (type === 'error') title = `Encountered ${events.length} error${events.length > 1 ? 's' : ''}`;
-  else if (type === 'activity') title = `${events.length} Action${events.length > 1 ? 's' : ''}`;
-  else if (type === 'tool_execution') title = `${events.length} Background Step${events.length > 1 ? 's' : ''}`;
-  else if (type === 'task_update') title = `Task list updated (${events.length} event${events.length > 1 ? 's' : ''})`;
-  else title = `${events.length} ${type} event${events.length > 1 ? 's' : ''}`;
+  const allSameType = events.every(e => e.event_type === events[0].event_type);
+  if (allSameType) {
+    const t = events[0].event_type;
+    if (t === 'file_changed') title = `Explored ${events.length} file${events.length > 1 ? 's' : ''}`;
+    else if (t === 'terminal') title = `Executed ${events.length} terminal action${events.length > 1 ? 's' : ''}`;
+    else if (t === 'error') title = `Encountered ${events.length} error${events.length > 1 ? 's' : ''}`;
+    else if (t === 'activity') title = `${events.length} Action${events.length > 1 ? 's' : ''}`;
+    else if (t === 'tool_execution') title = `${events.length} Background Step${events.length > 1 ? 's' : ''}`;
+    else title = `${events.length} ${t} event${events.length > 1 ? 's' : ''}`;
+  } else {
+    title = `${events.length} Background Step${events.length > 1 ? 's' : ''}`;
+  }
 
   return (
     <div className="action-group">
@@ -114,99 +179,62 @@ const SuperGroup = ({ items }) => {
   );
 };
 
-const parseTasks = (content) => {
-  if (!content) return [];
-  const lines = content.split('\n');
-  const tasks = [];
-  let currentTask = null;
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    // Match line like: ✅ 1. Explore workspace...
-    // We use a regex that looks for optional non-word chars, then a number, then a dot.
-    const match = line.match(/^([^\w\s]*)\s*(\d+)\.\s+(.*)$/);
-    if (match) {
-      if (currentTask) tasks.push(currentTask);
-      currentTask = {
-        icon: match[1].trim(),
-        id: match[2],
-        title: match[3].trim(),
-        notes: ''
-      };
-    } else if (currentTask) {
-      // If it's a notes line
-      const notesMatch = line.match(/^\s*Notes:\s*(.*)$/i);
-      if (notesMatch) {
-        currentTask.notes = notesMatch[1].trim();
-      } else if (line.trim() !== '' && !line.includes('Task list updated')) {
-        // Append to notes if it's a continuation
-        if (currentTask.notes) currentTask.notes += '\n' + line.trim();
-        else currentTask.notes = line.trim();
-      }
-    }
-  }
-  if (currentTask) tasks.push(currentTask);
-  return tasks;
-};
 
 /**
  * Activity panel showing hierarchical agent actions and messages.
  */
 export default function ActivityPanel({ events, agentStatus, sessionId }) {
   const bottomRef = useRef(null);
-  const [activeTab, setActiveTab] = useState('activity');
 
   const filteredEvents = events.filter(e => 
     e.event_type !== 'terminal' && 
     e.event_type !== 'status'
   );
 
-  const taskSets = [];
-  events.filter(e => e.event_type === 'task_update').forEach(e => {
-    const parsed = parseTasks(e.payload?.content);
-    if (parsed.length === 0) return;
-    
-    let isNewSet = false;
-    if (taskSets.length > 0) {
-      const currentSet = taskSets[taskSets.length - 1];
-      for (const task of parsed) {
-        const existing = currentSet.get(task.id);
-        // If a task with the same ID has a completely different title, the agent started a new task set
-        if (existing && existing.title.trim().toLowerCase() !== task.title.trim().toLowerCase()) {
-          isNewSet = true;
-          break;
-        }
-      }
-    } else {
-      isNewSet = true;
-    }
-    
-    if (isNewSet) {
-      const newSet = new Map();
-      for (const task of parsed) {
-        newSet.set(task.id, task);
-      }
-      taskSets.push(newSet);
-    } else {
-      const currentSet = taskSets[taskSets.length - 1];
-      for (const task of parsed) {
-        currentSet.set(task.id, task);
-      }
-    }
-  });
+  // Preprocess events to match Executing (tool_execution) and Return (activity)
+  const processedEvents = [];
+  const pendingExecutions = [];
 
-  const taskSetsList = taskSets.map(map => Array.from(map.values()).sort((a, b) => parseInt(a.id) - parseInt(b.id)));
+  for (const e of filteredEvents) {
+    if (e.event_type === 'tool_execution') {
+      const copy = { ...e, pending: true, returns: [] };
+      pendingExecutions.push(copy);
+      processedEvents.push(copy);
+    } else if (e.event_type === 'activity') {
+      const toolName = e.payload?.tool_name;
+      const toolCallId = e.payload?.tool_call_id;
+      if (toolName) {
+        let matchIdx = -1;
+        if (toolCallId) {
+          matchIdx = pendingExecutions.findIndex(ex => ex.payload?.tool_call_id === toolCallId && ex.pending);
+        }
+        if (matchIdx === -1) {
+          matchIdx = pendingExecutions.findIndex(ex => ex.payload?.tool_name === toolName && ex.pending);
+        }
+        if (matchIdx !== -1) {
+          const match = pendingExecutions[matchIdx];
+          match.pending = false;
+          match.returns.push(e);
+          pendingExecutions.splice(matchIdx, 1);
+        } else {
+          processedEvents.push(e);
+        }
+      } else {
+        processedEvents.push(e);
+      }
+    } else {
+      processedEvents.push(e);
+    }
+  }
 
   useEffect(() => {
-    if (activeTab === 'activity') {
-      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [filteredEvents.length, activeTab]);
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [filteredEvents.length]);
 
   const displayItems = [];
   let currentGroup = null;
 
-  for (const e of filteredEvents) {
+  for (const e of processedEvents) {
     if (e.event_type === 'message') {
       if (currentGroup) {
         displayItems.push(currentGroup);
@@ -249,9 +277,9 @@ export default function ActivityPanel({ events, agentStatus, sessionId }) {
       }
 
     } else {
-      if (!currentGroup || currentGroup.type !== e.event_type) {
+      if (!currentGroup || currentGroup.type !== 'background') {
         if (currentGroup) displayItems.push(currentGroup);
-        currentGroup = { type: e.event_type, events: [e] };
+        currentGroup = { type: 'background', events: [e] };
       } else {
         currentGroup.events.push(e);
       }
